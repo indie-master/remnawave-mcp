@@ -1,20 +1,20 @@
-# SwiftlessVPN: local review profile
+# Remnawave MCP: isolated review profile
 
 This example targets Remnawave 3.4.5 and the local hardening patch. It is a stdio MCP process, not an HTTP server or a Telegram bot.
 
 From the repository root, with Docker Compose installed:
 
 ```sh
-docker compose -f examples/swiftless/compose.yaml --profile offline build offline-check
-docker compose -f examples/swiftless/compose.yaml --profile offline run --rm --no-deps offline-check
+docker compose -f examples/safe-deployment/compose.yaml --profile offline build offline-check
+docker compose -f examples/safe-deployment/compose.yaml --profile offline run --rm --no-deps offline-check
 ```
 
 The offline command needs no token and cannot reach a panel at runtime. Building still downloads dependencies and base images.
 
-The optional `panel-read` profile is for a later, deliberate connection to a test panel. Create a separate API token with only the read scopes documented in the assessment. Store the token in a local file outside Git, set `SWIFTLESS_TOKEN_FILE` to its absolute path, and set `SWIFTLESS_PANEL_URL` to the canonical HTTPS URL without `/api`, credentials, query or fragment.
+The optional `panel-read` profile is for a later, deliberate connection to a test panel. Create a separate API token with only these read scopes: `system:read`, `nodes:read`, `users:read`, `hwid-user-devices:read`, `bandwidth-stats:read`, `subscription-request-history:read`. Store the token in a local file outside Git, set `MCP_TOKEN_FILE` to its absolute path, and set `MCP_PANEL_URL` to the canonical HTTPS URL without `/api`, credentials, query or fragment.
 
 ```sh
-docker compose -f examples/swiftless/compose.yaml --profile panel-read run --rm --no-deps -T mcp-stdio
+docker compose -f examples/safe-deployment/compose.yaml --profile panel-read run --rm --no-deps -T mcp-stdio
 ```
 
 An MCP client must launch that command and keep stdin/stdout connected. `docker compose up -d` in Portainer alone does not provide a usable remote MCP endpoint. The profile publishes no ports, mounts no Docker socket, and does not join the panel's network. Its bridge network allows outbound traffic; it is not an egress firewall.

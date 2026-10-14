@@ -1,9 +1,9 @@
-name: swiftless-mcp-review
+name: remnawave-mcp-review
 
 services:
   offline-check:
     profiles: [offline]
-    image: swiftless/remnawave-mcp:local-3.4.5
+    image: remnawave-mcp:local-3.4.5
     build:
       context: ../..
     command: [--list-tools]
@@ -17,13 +17,13 @@ services:
 
   mcp-stdio:
     profiles: [panel-read]
-    image: swiftless/remnawave-mcp:local-3.4.5
+    image: remnawave-mcp:local-3.4.5
     build:
       context: ../..
     stdin_open: true
     tty: false
     environment:
-      REMNAWAVE_BASE_URL: ${SWIFTLESS_PANEL_URL:-https://panel.example.invalid}
+      REMNAWAVE_BASE_URL: ${MCP_PANEL_URL:-https://panel.example.invalid}
       REMNAWAVE_API_TOKEN_FILE: /run/secrets/remnawave_api_token
       REMNAWAVE_READONLY: 'true'
       REMNAWAVE_PRIVACY: strict
@@ -45,4 +45,4 @@ networks:
 
 secrets:
   remnawave_api_token:
-    file: ${SWIFTLESS_TOKEN_FILE:-./secrets/remnawave_api_token}
+    file: ${MCP_TOKEN_FILE:-./secrets/remnawave_api_token}
