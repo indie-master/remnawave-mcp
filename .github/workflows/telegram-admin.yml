@@ -1,0 +1,61 @@
+name: Telegram admin bot
+on:
+  push:
+    paths:
+      - apps/telegram-admin/**
+      - apps/telegram-client/**
+      - src/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/telegram-admin.yml
+  pull_request:
+    paths:
+      - apps/telegram-admin/**
+      - apps/telegram-client/**
+      - src/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/telegram-admin.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: npm run test:bot
+      - run: bash -n apps/telegram-admin/configure.sh
+      - name: Validate Compose using synthetic configuration only
+        env:
+          REMNAWAVE_BASE_URL: https://panel.example.invalid
+          BOT_USERNAME: example_admin_bot
+          TELEGRAM_ADMIN_ID: '123456789'
+        run: docker compose -f apps/telegram-admin/compose.yaml config --quiet
+      - uses: docker/setup-buildx-action@v4
+      - name: Build without publishing an image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/telegram-admin/Dockerfile
+          load: true
+          push: false
+          tags: panel-admin-bot:ci
+      - name: Offline startup guard and non-root user
+        run: |
+          if docker run --rm --network none panel-admin-bot:ci; then
+            echo "Unexpected live startup without approval"
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 2
+          fi
+          test "$(docker run --rm --network none --entrypoint id panel-admin-bot:ci -u)" = "1000"
