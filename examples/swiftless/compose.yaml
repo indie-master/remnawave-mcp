@@ -1,0 +1,48 @@
+name: swiftless-mcp-review
+
+services:
+  offline-check:
+    profiles: [offline]
+    image: swiftless/remnawave-mcp:local-3.4.5
+    build:
+      context: ../..
+    command: [--list-tools]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  mcp-stdio:
+    profiles: [panel-read]
+    image: swiftless/remnawave-mcp:local-3.4.5
+    build:
+      context: ../..
+    stdin_open: true
+    tty: false
+    environment:
+      REMNAWAVE_BASE_URL: ${SWIFTLESS_PANEL_URL:-https://panel.example.invalid}
+      REMNAWAVE_API_TOKEN_FILE: /run/secrets/remnawave_api_token
+      REMNAWAVE_READONLY: 'true'
+      REMNAWAVE_PRIVACY: strict
+      REMNAWAVE_MAX_PAGE_SIZE: '100'
+      REMNAWAVE_MAX_RESPONSE_CHARS: '20000'
+      REMNAWAVE_MAX_RESPONSE_BYTES: '5242880'
+      REMNAWAVE_TOOLS_INCLUDE: panel_overview,get_nodes,get_stats,get_metadata,get_bandwidth_stats,find_user,user_report,sharing_suspects
+    secrets: [remnawave_api_token]
+    networks: [mcp-egress]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+networks:
+  mcp-egress: {}
+
+secrets:
+  remnawave_api_token:
+    file: ${SWIFTLESS_TOKEN_FILE:-./secrets/remnawave_api_token}
