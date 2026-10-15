@@ -195,3 +195,14 @@ test('AI deployment is opt-in and cannot mount Telegram or panel credentials', (
     assert.match(base, /AI_ENABLED: "false"/);
     assert.ok(!base.includes('codex-auth'));
 });
+
+test('native CLI explicitly receives the installed public CA bundle in every subprocess', () => {
+    const dockerfile = readFileSync(new URL('./Dockerfile.ai', import.meta.url), 'utf8');
+    assert.match(dockerfile, /apt-get install -y --no-install-recommends ca-certificates/);
+    assert.match(dockerfile, /test -s \/etc\/ssl\/certs\/ca-certificates\.crt/);
+    for (const file of ['ai-login.mjs', 'codex-classifier.mjs', 'verify-ai-cli.mjs']) {
+        const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+        assert.ok(source.includes("CODEX_CA_CERTIFICATE: '/etc/ssl/certs/ca-certificates.crt'"));
+        assert.doesNotMatch(source, /NODE_TLS_REJECT_UNAUTHORIZED|rejectUnauthorized:\s*false/);
+    }
+});

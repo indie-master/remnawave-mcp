@@ -91,6 +91,7 @@ jobs:
           tags: panel-admin-ai:ci
       - name: Verify pinned CLI and disabled features offline, without model inference
         run: |
+          docker run --rm --network none --read-only --entrypoint node panel-admin-ai:ci --input-type=module -e 'import assert from "node:assert/strict"; import { readFileSync } from "node:fs"; import { X509Certificate } from "node:crypto"; const path = "/etc/ssl/certs/ca-certificates.crt"; assert.equal(process.env.CODEX_CA_CERTIFICATE, path); const certificates = readFileSync(path, "utf8").match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g); assert.ok(certificates?.length); for (const certificate of certificates) new X509Certificate(certificate); console.log("System CA bundle is present and parseable; TLS verification remains enabled.");'
           docker run --rm --network none --read-only --tmpfs /home/node/.codex:rw,uid=1000,gid=1000,size=16m --tmpfs /tmp:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-ai:ci --input-type=module -e 'import { verifyClassifierCli } from "/app/apps/telegram-admin/verify-ai-cli.mjs"; verifyClassifierCli({ requireLogin: false }); console.log("Pinned CLI and disabled features verified; no credentials or inference.");'
           test "$(docker run --rm --network none --entrypoint id panel-admin-ai:ci -u)" = "1000"
           if docker run --rm --network none panel-admin-ai:ci; then

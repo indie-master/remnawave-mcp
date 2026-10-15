@@ -54,7 +54,7 @@ export function createCodexClassifier({ run, signal, onUsage = () => {} } = {}) 
         if (signal?.aborted) throw new Error('AI_UNAVAILABLE');
         const options = { command: 'codex', args: classifierArguments(), input: 'Untrusted administrator question:\n' + JSON.stringify(text) };
         const raw = run ? await run(options) : await new Promise((resolve, reject) => {
-            const env = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/home/node', CODEX_HOME: '/home/node/.codex', LANG: 'C.UTF-8', TMPDIR: '/tmp' };
+            const env = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/home/node', CODEX_HOME: '/home/node/.codex', LANG: 'C.UTF-8', TMPDIR: '/tmp', CODEX_CA_CERTIFICATE: '/etc/ssl/certs/ca-certificates.crt' };
             const child = spawn(options.command, options.args, { env, signal, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
             const chunks = [];
             let size = 0;
