@@ -7,7 +7,7 @@ import { validateIntent } from './intent.mjs';
 export const codexVersion = '0.162.1';
 export const classifierModel = 'gpt-6-luna';
 const directory = fileURLToPath(new URL('./', import.meta.url));
-export const disabledFeatures = ['shell_tool', 'unified_exec', 'plugins', 'apps', 'remote_plugin', 'multi_agent', 'multi_agent_v2', 'hooks', 'goals', 'memories', 'shell_snapshot', 'code_mode_host', 'browser_use', 'browser_use_external', 'computer_use', 'image_generation', 'artifact', 'in_app_browser', 'in_app_chat', 'in_app_local_automation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'tool_suggest', 'view_image', 'sleep_tool', 'recommended_plugins', 'request_permissions_tool', 'unbounded_connection_retries', 'daemon_auto_start', 'fast_mode', 'ultrafast_mode'];
+export const disabledFeatures = ['shell_tool', 'plugins', 'apps', 'remote_plugin', 'multi_agent', 'multi_agent_v2', 'hooks', 'goals', 'memories', 'shell_snapshot', 'code_mode_host', 'browser_use', 'browser_use_external', 'computer_use', 'image_generation', 'artifact', 'in_app_browser', 'in_app_chat', 'in_app_local_automation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'tool_suggest', 'view_image', 'sleep_tool', 'recommended_plugins', 'request_permissions_tool', 'unbounded_connection_retries', 'daemon_auto_start', 'fast_mode', 'ultrafast_mode'];
 
 export function guardClassifierEvent(line) {
     let event;

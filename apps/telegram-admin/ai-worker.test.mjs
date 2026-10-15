@@ -65,7 +65,7 @@ test('CLI preflight checks the exact release, disabled features and ChatGPT logi
     const run = args => {
         calls.push(args);
         if (args.includes('--version')) return { status: 0, stdout: `codex-cli ${codexVersion}\n` };
-        if (args.includes('features')) return { status: 0, stdout: disabledFeatures.map(feature => `${feature} stable false`).join('\n') };
+        if (args.includes('features')) return { status: 0, stdout: disabledFeatures.map(feature => `${feature} stable false`).join('\n') + '\nunified_exec stable true' };
         if (args.includes('--help')) return { status: 0, stdout: '--json --ephemeral --output-schema --ignore-user-config' };
         return { status: 0, stdout: '', stderr: 'Logged in using ChatGPT' };
     };
@@ -73,6 +73,7 @@ test('CLI preflight checks the exact release, disabled features and ChatGPT logi
     assert.equal(calls.length, 4);
     assert.ok(calls.every(args => !args.includes('-')));
     assert.throws(() => verifyClassifierCli({ run: () => ({ status: 0, stdout: 'codex-cli other' }) }), /VERSION_MISMATCH/);
+    assert.throws(() => verifyClassifierCli({ run: args => { const result = run(args); if (args.includes('features')) result.stdout = result.stdout.replace('shell_tool stable false', 'shell_tool stable true'); return result; } }), /FEATURES_UNAVAILABLE/);
     assert.throws(() => verifyClassifierCli({ run: args => args.includes('login') ? { status: 0, stderr: 'Logged in using an API key' } : run(args) }), /CHATGPT_LOGIN_REQUIRED/);
 });
 
