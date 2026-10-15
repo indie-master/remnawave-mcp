@@ -1,4 +1,4 @@
 services:
   bot:
     command: ["--live", "--confirm-sole-receiver", "--continuous"]
-    restart: "on-failure:3"
+    restart: "unless-stopped"

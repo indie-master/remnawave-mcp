@@ -15,6 +15,11 @@
 !apps/telegram-admin/configured-service.mjs
 !apps/telegram-admin/dashboard.mjs
 !apps/telegram-admin/intent.mjs
+!apps/telegram-admin/intent-store.mjs
+!apps/telegram-admin/budgeted-intent.mjs
+!apps/telegram-admin/report-mcp.mjs
+!apps/telegram-admin/run-safety.mjs
+!apps/telegram-admin/state-control.mjs
 !apps/telegram-admin/server-config.mjs
 !apps/telegram-admin/server-loop.mjs
 !apps/telegram-admin/start-server.mjs

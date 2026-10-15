@@ -7,7 +7,7 @@ const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     signal?.addEventListener('abort', finish, { once: true });
 });
 
-export async function runServerBot({ api, service, allowedUserId, botUsername, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
+export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
     if (soleReceiverConfirmed !== true || typeof continuous !== 'boolean' || !Number.isInteger(seconds) || seconds < 60 || seconds > 900) throw new Error('LIVE_START_NOT_AUTHORIZED');
     const result = { status: 'stopped', reason: null, replies: 0, polls: 0, startedAt: null, stoppedAt: null };
     let ready = false;
@@ -29,14 +29,18 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, s
             if (signal?.aborted || now() >= deadline) throw new Error('STOP_REQUESTED');
             return service[action](...args);
         };
-        const handle = createDashboard({ allowedUserId, service: guardedService, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
+        const readMcp = mcpRead ? async (action, days) => {
+            if (signal?.aborted || now() >= deadline) throw new Error('STOP_REQUESTED');
+            return mcpRead(action, days);
+        } : undefined;
+        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
         await api.sendReply(notification(continuous
             ? 'Бот запущен на сервере. Кнопки работают без ИИ. Отправка клиентам отключена.'
             : `Тест бота начался на ${seconds / 60} мин. Остановка: ${new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', timeStyle: 'medium' }).format(new Date(deadline))} МСК. Кнопки работают без ИИ, отправка клиентам отключена.`));
         result.replies++;
         ready = true;
         heartbeat();
-        onReady({ ready: true, continuous, maxSeconds: continuous ? null : seconds, subscriptionAi: false, customerSending: false, startedAt: result.startedAt });
+        onReady({ ready: true, continuous, maxSeconds: continuous ? null : seconds, subscriptionAi: aiEnabled, cachedText: !!classify, customerSending: false, startedAt: result.startedAt });
         let consecutiveErrors = 0;
         while (!signal?.aborted && now() < deadline) {
             let updates;

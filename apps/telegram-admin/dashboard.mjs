@@ -9,9 +9,10 @@ const time = value => new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Mosco
 const menu = keyboard([
     [button('📊 Статистика', 'q:stats'), button('🖥 Ноды', 'q:nodes')],
     [button('⏳ Подписки', 'periods'), button('ℹ️ Версия', 'q:version')],
+    [button('🧠 Лимит ИИ', 'budget')],
 ]);
 
-export function createDashboard({ allowedUserId, service, classify, mcpRead, answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
+export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
     if (!Number.isSafeInteger(allowedUserId) || allowedUserId <= 0) throw new Error('INVALID_ADMIN_ID');
     const reports = new Map();
     const drafts = new Map();
@@ -83,7 +84,12 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, ans
         try {
             const data = callback?.data;
             const text = callback ? '' : message.text.trim();
-            if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.') + '\nУведомления: только черновики администратору.');
+            if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (textModeDescription ?? (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.')) + '\nУведомления: только черновики администратору.');
+            if (data === 'budget' || text === '/budget') {
+                if (!budgetStatus) return reply('Учёт ИИ недоступен. Кнопки работают без ИИ.');
+                const budget = budgetStatus();
+                return reply(`<b>🧠 Лимит ИИ</b>\nСутки: ${escapeHtml(budget.day)} МСК\nПопыток: ${budget.used}/${budget.limit}\nОсталось: ${budget.remaining}\nСохранённых команд: ${budget.cacheEntries}\n\nКнопки, локальные команды и повторения из кеша не расходуют лимит. Ошибки ИИ учитываются. Это счётчик вызовов нашего бота, не остаток подписки ChatGPT.`);
+            }
             if (data === 'periods' || text === '/expiring') return reply('За какой период проверить подписки?', keyboard([
                 ...[[1, 3, 7], [14, 30]].map(days => days.map(day => button(`${day} дн.`, `q:expiring:${day}`))),
                 [button('🏠 Меню', 'home')],
@@ -139,6 +145,11 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, ans
                 throw error;
             } finally { busy = false; }
         } catch (error) {
+            if (error?.message === 'AI_DAILY_LIMIT') return reply('Достигнут суточный лимит обращений к ИИ. Используйте кнопки или уже распознанные вопросы: данные панели будут свежими.');
+            if (error?.message === 'AI_RATE_LIMIT' || error?.message === 'AI_BUSY') return reply('Новое обращение к ИИ возможно не чаще раза в минуту. Кнопки и известные вопросы не расходуют бюджет.');
+            if (error?.message === 'AI_NOT_CONFIGURED') return reply('Этот вопрос пока не распознан локально, а ИИ ещё не подключён. Используйте кнопки или короткие команды, например «статистика», «проверь ноды».');
+            if (error?.message === 'AI_TEXT_REJECTED') return reply('Для текстового вопроса используйте не более 500 символов, без токенов и ссылок. Кнопки работают без ИИ.');
+            if (error?.message === 'AI_STATE_UNAVAILABLE' || error?.message === 'AI_CLOCK_UNAVAILABLE') return reply('Безопасный учёт ИИ недоступен, поэтому новый вызов запрещён. Кнопки работают без ИИ.');
             if (error?.message === 'USERS_READ_NOT_ENABLED') return reply('Отчёт о подписках ещё не включён: текущему интеграционному токену нужно отдельное разрешение <code>users:list</code>. Права панели не менялись.');
             if (error?.message === 'REPORT_EXPIRED') return reply('Сохранённый отчёт или черновик устарел. Выполните проверку заново.');
             return reply('Данные недоступны или запрос не поддерживается. Проверьте токен, права чтения и доступность ИИ. Изменения не выполнялись.');

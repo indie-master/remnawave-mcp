@@ -59,3 +59,23 @@ jobs:
             test "$status" -eq 2
           fi
           test "$(docker run --rm --network none --entrypoint id panel-admin-bot:ci -u)" = "1000"
+      - name: Offline SQLite budget and real MCP transport in the runtime image
+        run: |
+          docker run --rm -i --network none --read-only --tmpfs /state:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-bot:ci --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createIntentStore } from '/app/apps/telegram-admin/intent-store.mjs';
+          import { createBudgetedIntent } from '/app/apps/telegram-admin/budgeted-intent.mjs';
+          import { connectReportMcp } from '/app/apps/telegram-admin/report-mcp.mjs';
+          const store = createIntentStore({ filename: '/state/test.sqlite' });
+          let calls = 0;
+          const classify = createBudgetedIntent({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
+          await classify('Synthetic report');
+          await classify('  SYNTHETIC REPORT? ');
+          assert.equal(calls, 1);
+          assert.equal(store.status().used, 1);
+          const reports = await connectReportMcp({ stats: async () => ({ totalUsers: 10, usersOnline: 2, observedAt: '2026-10-15T12:00:00.000Z' }) });
+          assert.equal((await reports.read('stats')).usersOnline, 2);
+          await reports.close();
+          store.close();
+          console.log('Offline runtime budget and MCP checks passed; no network or model requests.');
+          NODE

@@ -5,3 +5,5 @@ secrets/
 state/
 *.local.json
 *.log
+*.sqlite*
+receiver-safety.json
