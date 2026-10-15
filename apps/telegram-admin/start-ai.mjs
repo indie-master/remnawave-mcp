@@ -22,7 +22,8 @@ try {
     mkdirSync('/state', { recursive: true, mode: 0o700 });
     safety = createRunSafety({ directory: '/state' });
     const pauseFile = '/state/classifier-paused';
-    const paused = () => safety.read().mode === 'paused' || existsSync(pauseFile);
+    let failurePaused = false;
+    const paused = () => failurePaused || safety.read().mode === 'paused' || existsSync(pauseFile);
     const heartbeat = () => writeFileSync('/state/heartbeat.json', JSON.stringify({ observedAt: Date.now(), phase: paused() ? 'paused' : 'ready' }), { mode: 0o600 });
     if (paused()) {
         heartbeat(); event({ status: 'paused', externalCalls: false });
@@ -30,7 +31,7 @@ try {
     } else {
         verifyClassifierCli();
         store = createIntentStore({ filename: '/state/ai-quota.sqlite' });
-        server = createClassifierServer({ store, paused, pause: () => writeFileSync(pauseFile, 'AI_GUARD_TRIGGERED\n', { mode: 0o600 }), classify: (text, signal) => createCodexClassifier({ signal, onUsage: usage => event({ event: 'usage', ...usage }) })(text), onEvent: event });
+        server = createClassifierServer({ store, paused, pause: diagnostic => { failurePaused = true; writeFileSync(pauseFile, JSON.stringify({ observedAt: new Date().toISOString(), ...diagnostic }) + '\n', { mode: 0o600 }); }, classify: (text, signal) => createCodexClassifier({ signal, onUsage: usage => event({ event: 'usage', ...usage }) })(text), onEvent: event });
         mkdirSync('/bridge', { recursive: true, mode: 0o700 });
         if (existsSync(classifierSocket)) {
             if (!statSync(classifierSocket).isSocket()) throw new Error('AI_SOCKET_UNAVAILABLE');

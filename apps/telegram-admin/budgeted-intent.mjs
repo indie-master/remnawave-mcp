@@ -31,6 +31,7 @@ export function createBudgetedIntent({ store, classify, onEvent = () => {} }) {
         if (busy) throw new Error('AI_BUSY');
         busy = true;
         try {
+            await classify.checkReady?.();
             const quota = store.reserve();
             onEvent({ event: 'intent', source: 'ai', remaining: quota.remaining });
             const intent = validateIntent(await classify(text));

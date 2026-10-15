@@ -5,12 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { request } from 'node:http';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { createIntentStore } from './intent-store.mjs';
 import { createBudgetedIntent } from './budgeted-intent.mjs';
 import { createClassifierClient } from './ai-client.mjs';
 import { createClassifierServer } from './ai-worker.mjs';
-import { classifierArguments, decodeClassifierOutput, guardClassifierEvent, createCodexClassifier, codexVersion, disabledFeatures } from './codex-classifier.mjs';
+import { classifierArguments, classifierDiagnostic, decodeClassifierOutput, guardClassifierEvent, createCodexClassifier, codexVersion, disabledFeatures } from './codex-classifier.mjs';
 import { verifyClassifierCli } from './verify-ai-cli.mjs';
+import { createDashboard } from './dashboard.mjs';
 
 const start = Date.UTC(2026, 9, 15, 12);
 const encoded = (intent = { action: 'expiring', days: 7 }, usage = { input_tokens: 500, cached_input_tokens: 100, output_tokens: 30 }) => [
@@ -45,6 +48,54 @@ test('tool events are refused as soon as a complete event arrives', () => {
 
 test('missing, malformed or unexpectedly large usage triggers the post-call guard', () => {
     for (const usage of [null, {}, { input_tokens: -1, output_tokens: 2 }, { input_tokens: 8001, output_tokens: 1 }, { input_tokens: 1, output_tokens: 1025 }, { input_tokens: 5, output_tokens: 1, cached_input_tokens: 6 }]) assert.throws(() => decodeClassifierOutput(encoded(undefined, usage)), /AI_USAGE_GUARD/);
+});
+
+test('usage failures expose only the precise fixed cause and safe numeric metrics', () => {
+    const examples = [
+        [null, 'MISSING_USAGE'], [{ input_tokens: 'PRIVATE_METRIC', output_tokens: 1 }, 'INVALID_USAGE'],
+        [{ input_tokens: 8001, cached_input_tokens: 30, output_tokens: 1 }, 'INPUT_LIMIT'],
+        [{ input_tokens: 100, output_tokens: 1025 }, 'OUTPUT_LIMIT'],
+    ];
+    for (const [usage, reason] of examples) {
+        let failure;
+        try { decodeClassifierOutput(encoded(undefined, usage)); } catch (error) { failure = error; }
+        const diagnostic = classifierDiagnostic(failure);
+        assert.equal(diagnostic.reason, reason);
+        assert.equal(diagnostic.cause, 'AI_USAGE_GUARD');
+        assert.ok(!JSON.stringify(diagnostic).includes('PRIVATE_METRIC'));
+        assert.ok(!JSON.stringify(failure).includes('PRIVATE_METRIC'));
+        if (reason === 'INPUT_LIMIT') assert.equal(diagnostic.inputTokens, 8001);
+        if (reason === 'OUTPUT_LIMIT') assert.equal(diagnostic.outputTokens, 1025);
+    }
+    assert.deepEqual(classifierDiagnostic({ message: 'PRIVATE_QUESTION', diagnostic: { reason: 'PRIVATE_TOKEN', inputTokens: 'PRIVATE_METRIC', signal: 'PRIVATE_PATH', exitCode: 1000, other: 'PRIVATE_OUTPUT' } }), { reason: 'CLASSIFIER_UNAVAILABLE' });
+});
+
+test('provider failures yield fixed hints without exposing the question, error body or credential text', () => {
+    const cases = [
+        ['The model is not supported when signed in', 'MODEL_UNAVAILABLE'],
+        ['Authentication failed', 'AUTH_UNAVAILABLE'], ['TLS handshake failed', 'TRANSPORT_UNAVAILABLE'],
+        ['permission denied', 'PERMISSION_DENIED'], ['invalid config', 'CONFIG_UNAVAILABLE'],
+        ['unrecognized provider failure', 'CLASSIFIER_UNAVAILABLE'],
+    ];
+    for (const [message, reason] of cases) {
+        let failure;
+        try { guardClassifierEvent(JSON.stringify({ type: 'turn.failed', error: { message: `${message}: PRIVATE_AUTH PRIVATE_QUESTION` } })); } catch (error) { failure = error; }
+        assert.deepEqual(classifierDiagnostic(failure), { reason, cause: 'AI_UNAVAILABLE' });
+    }
+});
+
+test('native process failures retain only bounded diagnostic codes, never stderr', async () => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = () => true;
+    const classify = createCodexClassifier({ spawnProcess: () => {
+        setImmediate(() => { child.stderr.write('permission denied: PRIVATE_AUTH PRIVATE_PATH'); child.emit('close', 2, null); });
+        return child;
+    } });
+    let failure;
+    try { await classify('Synthetic question'); } catch (error) { failure = error; }
+    assert.deepEqual(classifierDiagnostic(failure), { reason: 'PERMISSION_DENIED', cause: 'AI_UNAVAILABLE', exitCode: 2 });
+    assert.ok(!JSON.stringify(failure).includes('PRIVATE_'));
 });
 
 test('classifier passes only the question and returns no model-generated report', async () => {
@@ -85,7 +136,7 @@ async function bridgeFixture(options = {}) {
     const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\classifier-${randomUUID()}` : join(directory, 'classifier.sock');
     const store = createIntentStore({ filename: join(directory, 'quota.sqlite'), dailyLimit: options.dailyLimit ?? 10, now: () => clock });
     const events = [];
-    const server = createClassifierServer({ store, paused: () => paused, pause: () => { paused = true; }, classify: async (text, signal) => { calls++; return options.classify ? options.classify(text, signal) : { action: 'stats', days: 3 }; }, onEvent: value => events.push(value) });
+    const server = createClassifierServer({ store, paused: () => paused, pause: () => { if (options.failPause) throw new Error('PRIVATE_DISK_ERROR'); paused = true; }, classify: async (text, signal) => { calls++; return options.classify ? options.classify(text, signal) : { action: 'stats', days: 3 }; }, onEvent: value => events.push(value) });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
     return { socketPath, store, events, calls: () => calls, paused: () => paused, advance: () => { clock += 60000; }, close: async () => {
         server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); store.close(); rmSync(directory, { recursive: true, force: true });
@@ -116,6 +167,64 @@ test('worker counts failures without retry and blocks model calls after a usage 
         assert.equal(state.paused(), true);
         assert.equal(state.store.status().used, 1);
     } finally { await state.close(); }
+});
+
+test('paused worker is checked before another bot reservation and static reports still work', async () => {
+    const state = await bridgeFixture({ classify: async () => decodeClassifierOutput(encoded(undefined, { input_tokens: 8001, output_tokens: 1 })).intent });
+    let clock = start;
+    const store = createIntentStore({ filename: ':memory:', now: () => clock });
+    try {
+        const classify = createBudgetedIntent({ store, classify: createClassifierClient({ socketPath: state.socketPath }) });
+        await assert.rejects(classify('Synthetic novel question'), /AI_UNAVAILABLE/);
+        assert.equal(store.status().used, 1);
+        clock += 60000; state.advance();
+        await assert.rejects(classify('Synthetic different question'), /AI_PAUSED/);
+        assert.equal(store.status().used, 1);
+        assert.equal(state.calls(), 1);
+        assert.equal(state.store.status().used, 1);
+        assert.equal(state.events[0].reason, 'INPUT_LIMIT');
+        assert.equal(state.events[0].inputTokens, 8001);
+        assert.equal(state.events[0].paused, true);
+        assert.equal(state.events[0].pausePersisted, true);
+        assert.deepEqual(await classify('статистика'), { action: 'stats', days: 3 });
+    } finally { store.close(); await state.close(); }
+});
+
+test('missing worker socket cannot consume the bot budget', async () => {
+    const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\missing-classifier-${randomUUID()}` : join(tmpdir(), `missing-classifier-${randomUUID()}.sock`);
+    const store = createIntentStore({ filename: ':memory:', now: () => start });
+    try {
+        const classify = createBudgetedIntent({ store, classify: createClassifierClient({ socketPath }) });
+        await assert.rejects(classify('Synthetic novel question'), /AI_BRIDGE_UNAVAILABLE/);
+        assert.equal(store.status().used, 0);
+    } finally { store.close(); }
+});
+
+test('an ordinary classifier failure pauses subsequent calls even if persisting the pause fails', async () => {
+    const state = await bridgeFixture({ failPause: true, classify: async () => { throw new Error('PRIVATE_PROVIDER_BODY'); } });
+    try {
+        const classify = createClassifierClient({ socketPath: state.socketPath });
+        await assert.rejects(classify('Synthetic question'), /AI_UNAVAILABLE/);
+        state.advance();
+        await assert.rejects(classify.checkReady(), /AI_PAUSED/);
+        await assert.rejects(classify('Another question'), /AI_PAUSED/);
+        assert.equal(state.calls(), 1);
+        assert.equal(state.store.status().used, 1);
+        assert.equal(state.events[0].pausePersisted, false);
+        assert.ok(!JSON.stringify(state.events).includes('PRIVATE_'));
+    } finally { await state.close(); }
+});
+
+test('owner diagnostics distinguish a paused or absent worker without logging arbitrary errors', async () => {
+    for (const code of ['AI_PAUSED', 'AI_BRIDGE_UNAVAILABLE', 'AI_DAILY_LIMIT', 'PRIVATE_PROVIDER_BODY']) {
+        const events = [];
+        const dashboard = createDashboard({ allowedUserId: 123456789, now: () => start, classify: async () => { throw new Error(code); }, mcpRead: async () => assert.fail('Panel must not be read'), onDiagnostic: value => events.push(value) });
+        const reply = await dashboard({ update_id: 1, message: { text: 'Synthetic novel question', date: start / 1000, chat: { type: 'private', id: 123456789 }, from: { id: 123456789, is_bot: false } } });
+        assert.equal(events[0].code, code === 'PRIVATE_PROVIDER_BODY' ? 'AI_UNAVAILABLE' : code);
+        assert.ok(!JSON.stringify(events).includes('PRIVATE_'));
+        if (code === 'AI_BRIDGE_UNAVAILABLE') assert.match(reply.text, /не расходует попытку/);
+        if (code === 'AI_PAUSED') assert.match(reply.text, /защитной паузе/);
+    }
 });
 
 test('unsupported socket endpoints and invalid questions cannot reserve budget', async () => {
@@ -161,6 +270,26 @@ test('concurrent requests cannot queue another model call or consume another wor
         assert.equal(state.calls(), 1);
         release(); await first;
     } finally { release(); await state.close(); }
+});
+
+test('a busy worker cannot consume a second bot budget during the readiness check', async () => {
+    let release;
+    let started;
+    const ready = new Promise(resolve => { started = resolve; });
+    const result = new Promise(resolve => { release = resolve; });
+    const state = await bridgeFixture({ classify: async () => { started(); await result; return { action: 'stats', days: 3 }; } });
+    const store = createIntentStore({ filename: ':memory:', now: () => start });
+    try {
+        const client = createClassifierClient({ socketPath: state.socketPath });
+        const first = client('Synthetic first question');
+        await ready;
+        const classify = createBudgetedIntent({ store, classify: client });
+        await assert.rejects(classify('Synthetic second question'), /AI_BUSY/);
+        assert.equal(store.status().used, 0);
+        assert.equal(state.store.status().used, 1);
+        assert.equal(state.calls(), 1);
+        release(); await first;
+    } finally { release(); store.close(); await state.close(); }
 });
 
 test('disconnecting the owner request cancels classifier work without refund or retry', async () => {

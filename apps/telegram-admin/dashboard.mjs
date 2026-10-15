@@ -141,11 +141,13 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 onDiagnostic({ event: 'report', action: intent.action, source, ok: true });
                 return rendered;
             } catch (error) {
-                onDiagnostic({ event: 'report', action: intent?.action ?? 'unknown', source: source ?? 'mcp', ok: false, code: stage === 'ai' ? 'AI_UNAVAILABLE' : 'PANEL_READ_UNAVAILABLE' });
+                const aiCode = ['AI_PAUSED', 'AI_BRIDGE_UNAVAILABLE', 'AI_DAILY_LIMIT', 'AI_RATE_LIMIT', 'AI_BUSY', 'AI_NOT_CONFIGURED', 'AI_STATE_UNAVAILABLE', 'AI_CLOCK_UNAVAILABLE', 'AI_TEXT_REJECTED'].includes(error?.message) ? error.message : 'AI_UNAVAILABLE';
+                onDiagnostic({ event: 'report', action: intent?.action ?? 'unknown', source: source ?? 'mcp', ok: false, code: stage === 'ai' ? aiCode : 'PANEL_READ_UNAVAILABLE' });
                 throw error;
             } finally { busy = false; }
         } catch (error) {
             if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
+            if (error?.message === 'AI_BRIDGE_UNAVAILABLE') return reply('ИИ-модуль сейчас недоступен. Проверка готовности не расходует попытку. Используйте кнопки или знакомые вопросы.');
             if (error?.message === 'AI_UNAVAILABLE') return reply('ИИ временно недоступен или не смог безопасно распознать вопрос. Попытка учтена, автоматического повтора нет. Используйте кнопки или знакомые вопросы.');
             if (error?.message === 'AI_DAILY_LIMIT') return reply('Достигнут суточный лимит обращений к ИИ. Используйте кнопки или уже распознанные вопросы: данные панели будут свежими.');
             if (error?.message === 'AI_RATE_LIMIT' || error?.message === 'AI_BUSY') return reply('Новое обращение к ИИ возможно не чаще раза в минуту. Кнопки и известные вопросы не расходуют бюджет.');

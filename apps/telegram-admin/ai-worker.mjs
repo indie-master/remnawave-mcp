@@ -1,17 +1,26 @@
 import { createServer } from 'node:http';
 import { validateIntent } from './intent.mjs';
 import { normalizeQuestion } from './intent-store.mjs';
+import { classifierDiagnostic } from './codex-classifier.mjs';
 
 export function createClassifierServer({ store, classify, paused = () => false, pause = () => {}, onEvent = () => {} }) {
     let busy = false;
+    let failed = false;
+    const isPaused = () => failed || paused();
     const server = createServer(async (request, response) => {
         const send = (status, value) => { if (!response.destroyed) response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
-        if (request.method === 'GET' && request.url === '/health') { send(paused() ? 503 : 200, { ready: !paused() }); return; }
-        if (paused()) { send(503, { code: 'AI_PAUSED' }); request.resume(); return; }
+        if (request.method === 'GET' && request.url === '/health') {
+            if (isPaused()) send(503, { ready: false, code: 'AI_PAUSED' });
+            else if (busy) send(429, { ready: false, code: 'AI_BUSY' });
+            else send(200, { ready: true });
+            return;
+        }
+        if (isPaused()) { send(503, { code: 'AI_PAUSED' }); request.resume(); return; }
         if (request.method !== 'POST' || request.url !== '/classify' || request.headers['content-type'] !== 'application/json') { send(503, { code: 'AI_UNAVAILABLE' }); request.resume(); return; }
         if (busy) { send(429, { code: 'AI_BUSY' }); request.resume(); return; }
         busy = true;
         const controller = new AbortController();
+        let attempted = false;
         response.once('close', () => { if (!response.writableEnded) controller.abort(); });
         try {
             const chunks = [];
@@ -24,17 +33,22 @@ export function createClassifierServer({ store, classify, paused = () => false, 
             const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (!value || Object.keys(value).join(',') !== 'question') throw new Error('AI_TEXT_REJECTED');
             normalizeQuestion(value.question);
-            if (controller.signal.aborted || paused()) throw new Error('AI_UNAVAILABLE');
+            if (controller.signal.aborted || isPaused()) throw new Error('AI_UNAVAILABLE');
             store.reserve();
+            attempted = true;
             const intent = validateIntent(await classify(value.question, controller.signal));
             send(200, intent);
             onEvent({ event: 'classification', ok: true });
         } catch (error) {
-            if (['AI_TOOL_ATTEMPT', 'AI_USAGE_GUARD'].includes(error?.message)) pause();
+            let pausePersisted = false;
+            if (attempted) {
+                failed = true;
+                try { pause(classifierDiagnostic(error)); pausePersisted = true; } catch {}
+            }
             const quotaError = ['AI_DAILY_LIMIT', 'AI_RATE_LIMIT', 'AI_BUSY'].includes(error?.message);
             const code = quotaError ? error.message : 'AI_UNAVAILABLE';
             send(quotaError ? 429 : 503, { code });
-            onEvent({ event: 'classification', ok: false, code });
+            onEvent({ event: 'classification', ok: false, code, ...(attempted ? { paused: true, pausePersisted, ...classifierDiagnostic(error) } : {}) });
         } finally { busy = false; }
     });
     server.headersTimeout = 5000;

@@ -113,6 +113,9 @@ jobs:
           const server = createClassifierServer({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
           await new Promise(resolve => server.listen('/bridge/classifier.sock', resolve));
           const classify = createClassifierClient();
+          await classify.checkReady();
+          assert.equal(calls, 0);
+          assert.equal(store.status().used, 0);
           assert.deepEqual(await classify('Synthetic report'), { action: 'stats', days: 3 });
           await assert.rejects(classify('Second report'));
           assert.equal(calls, 1);
@@ -120,5 +123,29 @@ jobs:
           server.closeAllConnections();
           await new Promise(resolve => server.close(resolve));
           store.close();
+          const guardedStore = createIntentStore({ filename: '/state/guard.sqlite' });
+          let guardCalls = 0;
+          let paused = false;
+          const events = [];
+          const { decodeClassifierOutput } = await import('/app/apps/telegram-admin/codex-classifier.mjs');
+          const guarded = createClassifierServer({ store: guardedStore, paused: () => paused, pause: () => { paused = true; }, onEvent: event => events.push(event), classify: async () => {
+            guardCalls++;
+            const raw = [
+              { type: 'item.completed', item: { type: 'agent_message', text: '{"action":"stats","days":3}' } },
+              { type: 'turn.completed', usage: { input_tokens: 8001, output_tokens: 1 } },
+            ].map(value => JSON.stringify(value)).join('\n');
+            return decodeClassifierOutput(raw).intent;
+          } });
+          await new Promise(resolve => guarded.listen('/bridge/classifier.sock', resolve));
+          await assert.rejects(classify('Synthetic guard question'), /AI_UNAVAILABLE/);
+          await assert.rejects(classify.checkReady(), /AI_PAUSED/);
+          assert.equal(guardCalls, 1);
+          assert.equal(guardedStore.status().used, 1);
+          assert.equal(events[0].reason, 'INPUT_LIMIT');
+          assert.equal(events[0].inputTokens, 8001);
+          assert.equal(events[0].paused, true);
+          guarded.closeAllConnections();
+          await new Promise(resolve => guarded.close(resolve));
+          guardedStore.close();
           console.log('Offline socket and worker quota passed; classifier is synthetic.');
           NODE
