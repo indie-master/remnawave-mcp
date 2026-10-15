@@ -9,7 +9,10 @@ export const classifierModel = 'gpt-6-luna';
 const directory = fileURLToPath(new URL('./', import.meta.url));
 export const disabledFeatures = ['shell_tool', 'plugins', 'apps', 'remote_plugin', 'multi_agent', 'multi_agent_v2', 'hooks', 'goals', 'memories', 'shell_snapshot', 'code_mode_host', 'browser_use', 'browser_use_external', 'computer_use', 'image_generation', 'artifact', 'in_app_browser', 'in_app_chat', 'in_app_local_automation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'tool_suggest', 'view_image', 'sleep_tool', 'recommended_plugins', 'request_permissions_tool', 'unbounded_connection_retries', 'daemon_auto_start', 'fast_mode', 'ultrafast_mode'];
 
-const diagnosticReasons = ['TOOL_ATTEMPT', 'INVALID_JSONL', 'UNEXPECTED_EVENT', 'INVALID_ANSWER', 'MISSING_USAGE', 'INVALID_USAGE', 'INPUT_LIMIT', 'OUTPUT_LIMIT', 'OUTPUT_SIZE', 'PROCESS_EXIT', 'PROCESS_START', 'TIMEOUT', 'CANCELLED', 'MODEL_UNAVAILABLE', 'AUTH_UNAVAILABLE', 'TRANSPORT_UNAVAILABLE', 'CONFIG_UNAVAILABLE', 'PERMISSION_DENIED', 'CLASSIFIER_UNAVAILABLE'];
+const diagnosticReasons = ['TOOL_ATTEMPT', 'CLI_WARNING', 'UNEXPECTED_ITEM', 'INVALID_JSONL', 'UNEXPECTED_EVENT', 'INVALID_ANSWER', 'MISSING_USAGE', 'INVALID_USAGE', 'INPUT_LIMIT', 'OUTPUT_LIMIT', 'OUTPUT_SIZE', 'PROCESS_EXIT', 'PROCESS_START', 'TIMEOUT', 'CANCELLED', 'MODEL_UNAVAILABLE', 'AUTH_UNAVAILABLE', 'TRANSPORT_UNAVAILABLE', 'CONFIG_UNAVAILABLE', 'PERMISSION_DENIED', 'CLASSIFIER_UNAVAILABLE'];
+const toolItemTypes = ['command_execution', 'mcp_tool_call', 'web_search', 'file_change', 'collab_tool_call', 'function_call', 'todo_list'];
+const eventTypes = ['thread.started', 'turn.started', 'turn.completed', 'turn.failed', 'item.started', 'item.updated', 'item.completed', 'error'];
+const warningCodes = ['DEVELOPMENT_FEATURES', 'MODEL_METADATA', 'MODEL_REROUTED', 'CONFIG_WARNING', 'OTHER_WARNING'];
 
 function classifierFailure(reason, values = {}) {
     const error = new Error(reason === 'TOOL_ATTEMPT' ? 'AI_TOOL_ATTEMPT' : ['MISSING_USAGE', 'INVALID_USAGE', 'INPUT_LIMIT', 'OUTPUT_LIMIT'].includes(reason) ? 'AI_USAGE_GUARD' : 'AI_UNAVAILABLE');
@@ -25,6 +28,9 @@ export function classifierDiagnostic(error) {
         if (Number.isSafeInteger(value?.[key]) && value[key] >= 0 && (key !== 'exitCode' || value[key] <= 255)) result[key] = value[key];
     }
     if (['SIGTERM', 'SIGKILL', 'SIGABRT', 'SIGSEGV'].includes(value?.signal)) result.signal = value.signal;
+    if (eventTypes.includes(value?.eventType)) result.eventType = value.eventType;
+    if (['reasoning', 'agent_message', 'error', 'unknown', ...toolItemTypes].includes(value?.itemType)) result.itemType = value.itemType;
+    if (warningCodes.includes(value?.warningCode)) result.warningCode = value.warningCode;
     return result;
 }
 
@@ -40,15 +46,27 @@ function failureHint(text) {
 export function guardClassifierEvent(line) {
     let event;
     try { event = JSON.parse(line); } catch { throw classifierFailure('INVALID_JSONL'); }
-    if (String(event?.type).startsWith('item.') && !['reasoning', 'agent_message'].includes(event.item?.type)) throw classifierFailure('TOOL_ATTEMPT');
+    if (!event || typeof event !== 'object' || Array.isArray(event) || !eventTypes.includes(event.type)) throw classifierFailure('UNEXPECTED_EVENT');
+    if (event.type.startsWith('item.')) {
+        const itemType = event.item?.type;
+        const details = { eventType: event.type, itemType: ['reasoning', 'agent_message', 'error', ...toolItemTypes].includes(itemType) ? itemType : 'unknown' };
+        if (itemType === 'error') {
+            const message = typeof event.item.message === 'string' ? event.item.message.slice(0, 8192) : '';
+            const warningCode = /^Under-development features enabled:/i.test(message) ? 'DEVELOPMENT_FEATURES' : /model metadata|model information.*not found/i.test(message) ? 'MODEL_METADATA' : /^model rerouted:/i.test(message) ? 'MODEL_REROUTED' : /config|instructions|feature/i.test(message) ? 'CONFIG_WARNING' : 'OTHER_WARNING';
+            const hint = failureHint(message);
+            throw classifierFailure(hint === 'CLASSIFIER_UNAVAILABLE' ? 'CLI_WARNING' : hint, { ...details, warningCode });
+        }
+        if (toolItemTypes.includes(itemType)) throw classifierFailure('TOOL_ATTEMPT', details);
+        if (!['reasoning', 'agent_message'].includes(itemType)) throw classifierFailure('UNEXPECTED_ITEM', details);
+    }
     if (['error', 'turn.failed'].includes(event?.type)) throw classifierFailure(failureHint(String(event.message ?? event.error?.message ?? '')));
     return event;
 }
 
 export function classifierArguments() {
-    return ['--no-daemon', 'exec', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '--sandbox', 'read-only',
+    return ['--no-daemon', '--strict-config', 'exec', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '--sandbox', 'read-only',
         ...disabledFeatures.flatMap(feature => ['--disable', feature]),
-        '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'forced_login_method="chatgpt"',
+        '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'tools.update_plan.enabled=false', '-c', 'tools.experimental_request_user_input.enabled=false', '-c', 'forced_login_method="chatgpt"',
         '-c', 'model_provider="openai"', '-c', 'cli_auth_credentials_store="file"', '-c', 'model_reasoning_effort="low"', '-c', 'history.persistence="none"',
         '-c', 'project_doc_max_bytes=0', '-c', `model_instructions_file=${JSON.stringify(directory + 'classifier-instructions.md')}`,
         '--model', classifierModel, '--cd', '/empty', '--output-schema', directory + 'intent.schema.json', '--json', '--color', 'never', '-'];

@@ -26,7 +26,7 @@ test('classifier arguments pin a small model, short replacement instructions, su
     assert.equal(codexVersion, '0.162.1');
     assert.ok(args.includes('gpt-6-luna'));
     for (const feature of disabledFeatures) assert.ok(args.some((value, index) => value === '--disable' && args[index + 1] === feature));
-    for (const flag of ['--ephemeral', '--ignore-user-config', '--json', '--output-schema', 'forced_login_method="chatgpt"', 'model_reasoning_effort="low"', 'mcp_servers={}', 'web_search="disabled"']) assert.ok(args.includes(flag));
+    for (const flag of ['--strict-config', '--ephemeral', '--ignore-user-config', '--json', '--output-schema', 'forced_login_method="chatgpt"', 'model_reasoning_effort="low"', 'mcp_servers={}', 'web_search="disabled"', 'tools.update_plan.enabled=false', 'tools.experimental_request_user_input.enabled=false']) assert.ok(args.includes(flag));
     assert.ok(args.some(value => value.startsWith('model_instructions_file=')));
     assert.ok(!JSON.stringify(args).includes('panel_api_token'));
 });
@@ -39,10 +39,43 @@ test('strict JSONL result accepts only a read intent and safe numeric usage', ()
 });
 
 test('tool events are refused as soon as a complete event arrives', () => {
-    for (const type of ['command_execution', 'mcp_tool_call', 'web_search', 'file_change', 'function_call']) {
+    for (const type of ['command_execution', 'mcp_tool_call', 'web_search', 'file_change', 'function_call', 'collab_tool_call', 'todo_list']) {
         const line = JSON.stringify({ type: 'item.started', item: { type } });
         assert.throws(() => guardClassifierEvent(line), /AI_TOOL_ATTEMPT/);
         assert.throws(() => decodeClassifierOutput(line + '\n' + encoded()), /AI_TOOL_ATTEMPT/);
+    }
+});
+
+test('CLI warning items are not mislabeled as tool attempts and expose no warning body', () => {
+    const cases = [
+        ['invalid global instructions PRIVATE_AUTH', 'CONFIG_WARNING', 'CLI_WARNING'],
+        ['The model is not supported PRIVATE_ACCOUNT', 'OTHER_WARNING', 'MODEL_UNAVAILABLE'],
+        ['Under-development features enabled: PRIVATE_PATH', 'DEVELOPMENT_FEATURES', 'CLI_WARNING'],
+        ['model rerouted: PRIVATE_MODELS', 'MODEL_REROUTED', 'CLI_WARNING'],
+        ['Model metadata not found PRIVATE_CONTEXT', 'MODEL_METADATA', 'CLI_WARNING'],
+    ];
+    for (const [message, warningCode, reason] of cases) {
+        const line = JSON.stringify({ type: 'item.completed', item: { id: 'synthetic', type: 'error', message } });
+        let failure;
+        try { guardClassifierEvent(line); } catch (error) { failure = error; }
+        assert.equal(failure.message, 'AI_UNAVAILABLE');
+        assert.deepEqual(classifierDiagnostic(failure), { reason, cause: 'AI_UNAVAILABLE', eventType: 'item.completed', itemType: 'error', warningCode });
+        assert.ok(!JSON.stringify(failure).includes('PRIVATE_'));
+        assert.throws(() => decodeClassifierOutput(line + '\n' + encoded()), /AI_UNAVAILABLE/);
+    }
+});
+
+test('unknown event and item types fail closed without copying arbitrary type strings', () => {
+    const examples = [
+        [{ type: 'item.completed', item: { type: 'PRIVATE_UNKNOWN_TOOL', secret: 'PRIVATE_AUTH' } }, 'UNEXPECTED_ITEM'],
+        [{ type: 'PRIVATE_EVENT', item: { type: 'agent_message' } }, 'UNEXPECTED_EVENT'],
+        [null, 'UNEXPECTED_EVENT'], [[], 'UNEXPECTED_EVENT'],
+    ];
+    for (const [event, reason] of examples) {
+        let failure;
+        try { guardClassifierEvent(JSON.stringify(event)); } catch (error) { failure = error; }
+        assert.equal(classifierDiagnostic(failure).reason, reason);
+        assert.ok(!JSON.stringify(failure).includes('PRIVATE_'));
     }
 });
 
