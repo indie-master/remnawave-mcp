@@ -69,6 +69,7 @@ jobs:
           import { createBudgetedIntent } from '/app/apps/telegram-admin/budgeted-intent.mjs';
           import { connectReportMcp } from '/app/apps/telegram-admin/report-mcp.mjs';
           const store = createIntentStore({ filename: '/state/test.sqlite' });
+          assert.equal(store.status().limit, 100);
           let calls = 0;
           const classify = createBudgetedIntent({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
           await classify('Synthetic report');
@@ -152,6 +153,7 @@ jobs:
           await new Promise(resolve => server.close(resolve));
           store.close();
           const guardedStore = createIntentStore({ filename: '/state/guard.sqlite' });
+          assert.equal(guardedStore.status().limit, 100);
           let guardCalls = 0;
           let paused = false;
           const events = [];

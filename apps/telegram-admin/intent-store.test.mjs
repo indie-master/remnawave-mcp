@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createIntentStore, normalizeQuestion } from './intent-store.mjs';
+import { createIntentStore, maxDailyAiAttempts, normalizeQuestion } from './intent-store.mjs';
 import { createBudgetedIntent, localIntent } from './budgeted-intent.mjs';
 import { createRunSafety, waitForOperator } from './run-safety.mjs';
 import { createDashboard } from './dashboard.mjs';
@@ -36,18 +36,79 @@ test('learned intents and daily reservations survive database close and reopen',
     } finally { store.close(); }
 });
 
-test('the eleventh new AI request is refused while cached and local commands remain available', async () => {
+test('the hundred-and-first new AI request is refused while cached and local commands remain available', async () => {
     let clock = start;
     let calls = 0;
     const store = createIntentStore({ filename: ':memory:', now: () => clock });
     try {
         const classify = createBudgetedIntent({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
-        for (let index = 0; index < 10; index++) { await classify(question(index)); clock += 60000; }
-        await assert.rejects(classify(question(10)), /AI_DAILY_LIMIT/);
-        assert.equal(store.status().used, 10);
+        assert.equal(store.status().limit, 100);
+        for (let index = 0; index < 100; index++) { await classify(question(index)); clock += 60000; }
+        await assert.rejects(classify(question(100)), /AI_DAILY_LIMIT/);
+        assert.equal(store.status().used, 100);
+        assert.equal(store.status().remaining, 0);
         await classify(question(0));
         await classify('проверь ноды');
-        assert.equal(calls, 10);
+        assert.equal(calls, 100);
+    } finally { store.close(); }
+});
+
+test('raising the legacy limit keeps spent attempts and cached intents across restarts above ten uses', async () => {
+    const filename = newFile('legacy-intent.sqlite');
+    let clock = start;
+    let store = createIntentStore({ filename, dailyLimit: 10, now: () => clock });
+    for (let index = 0; index < 6; index++) { store.reserve(); clock += 60000; }
+    store.put('Legacy cached question', { action: 'stats', days: 3 });
+    store.close();
+    store = createIntentStore({ filename, now: () => clock });
+    try {
+        assert.deepEqual({ used: store.status().used, limit: store.status().limit, remaining: store.status().remaining }, { used: 6, limit: 100, remaining: 94 });
+        let calls = 0;
+        const classify = createBudgetedIntent({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
+        await classify('LEGACY CACHED QUESTION?');
+        assert.equal(calls, 0);
+        assert.equal(store.status().used, 6);
+        for (let index = 6; index < 11; index++) { store.reserve(); clock += 60000; }
+        store.close();
+        store = createIntentStore({ filename, now: () => clock });
+        assert.equal(store.status().used, 11);
+        assert.equal(store.status().remaining, 89);
+        assert.equal(store.reserve().used, 12);
+    } finally { store.close(); }
+});
+
+test('only finite integer daily caps from zero through one hundred are accepted', () => {
+    assert.equal(maxDailyAiAttempts, 100);
+    for (const dailyLimit of [-1, 101, Infinity, NaN, 1.5, '100', null]) assert.throws(() => createIntentStore({ filename: ':memory:', dailyLimit }), /INVALID_AI_CONFIGURATION/);
+    const store = createIntentStore({ filename: ':memory:', dailyLimit: 0, now: () => start });
+    try { assert.throws(() => store.reserve(), /AI_DAILY_LIMIT/); }
+    finally { store.close(); }
+});
+
+test('lowering a configured cap does not erase already spent attempts or invalidate their history', () => {
+    const filename = newFile('lower-cap.sqlite');
+    let clock = start;
+    const previous = createIntentStore({ filename, now: () => clock });
+    for (let index = 0; index < 11; index++) { previous.reserve(); clock += 60000; }
+    previous.close();
+    const store = createIntentStore({ filename, dailyLimit: 10, now: () => clock });
+    try {
+        assert.equal(store.status().used, 11);
+        assert.equal(store.status().remaining, 0);
+        assert.throws(() => store.reserve(), /AI_DAILY_LIMIT/);
+    } finally { store.close(); }
+});
+
+test('the owner budget command displays the new cap without charging another attempt', async () => {
+    let clock = start;
+    const store = createIntentStore({ filename: ':memory:', now: () => clock });
+    try {
+        for (let index = 0; index < 6; index++) { store.reserve(); clock += 60000; }
+        const handle = createDashboard({ allowedUserId: 123456789, now: () => clock, budgetStatus: store.status });
+        const reply = await handle({ update_id: 1, message: { text: '/budget', date: Math.floor(clock / 1000), chat: { type: 'private', id: 123456789 }, from: { id: 123456789, is_bot: false } } });
+        assert.match(reply.text, /Попыток: 6\/100/);
+        assert.match(reply.text, /Осталось: 94/);
+        assert.equal(store.status().used, 6);
     } finally { store.close(); }
 });
 

@@ -4,7 +4,7 @@ import { createConfiguredService } from './configured-service.mjs';
 import { createTelegramApi } from '../telegram-client/telegram-api.mjs';
 import { readRunOptions, readServerConfig } from './server-config.mjs';
 import { runServerBot } from './server-loop.mjs';
-import { createIntentStore } from './intent-store.mjs';
+import { createIntentStore, maxDailyAiAttempts } from './intent-store.mjs';
 import { createBudgetedIntent } from './budgeted-intent.mjs';
 import { createRunSafety, waitForOperator } from './run-safety.mjs';
 import { createClassifierClient } from './ai-client.mjs';
@@ -50,7 +50,7 @@ async function main() {
     const result = await runServerBot({
         ...options, api, service, allowedUserId: config.allowedUserId, botUsername: config.botUsername, signal: controller.signal,
         classify, budgetStatus: intentStore?.status, aiEnabled: config.aiEnabled && !!classify,
-        textModeDescription: classify ? (config.aiEnabled ? 'Знакомые вопросы — локально; новые — через подписку Codex, до 10 попыток в сутки. Данные обновляются через MCP.' : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
+        textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${maxDailyAiAttempts} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
         mcpRead: classify ? async (action, days) => {
             if (controller.signal.aborted) throw new Error('STOP_REQUESTED');
             reports ??= await (await import('./report-mcp.mjs')).connectReportMcp(service);

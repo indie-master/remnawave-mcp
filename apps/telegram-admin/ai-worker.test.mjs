@@ -195,7 +195,7 @@ async function bridgeFixture(options = {}) {
     let paused = false;
     const directory = mkdtempSync(join(tmpdir(), 'classifier-'));
     const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\classifier-${randomUUID()}` : join(directory, 'classifier.sock');
-    const store = createIntentStore({ filename: join(directory, 'quota.sqlite'), dailyLimit: options.dailyLimit ?? 10, now: () => clock });
+    const store = createIntentStore({ filename: join(directory, 'quota.sqlite'), dailyLimit: options.dailyLimit, now: () => clock });
     const events = [];
     const server = createClassifierServer({ store, paused: () => paused, pause: () => { if (options.failPause) throw new Error('PRIVATE_DISK_ERROR'); paused = true; }, classify: async (text, signal) => { calls++; return options.classify ? options.classify(text, signal) : { action: 'stats', days: 3 }; }, onEvent: value => events.push(value) });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
@@ -215,6 +215,21 @@ test('private socket bridge enforces an independent persistent daily quota', asy
         assert.equal(state.store.status().used, 1);
         assert.ok(!JSON.stringify(state.events).includes('Synthetic'));
     } finally { await state.close(); }
+});
+
+test('bot and worker both default to a hundred daily attempts without changing cache charging', async () => {
+    const state = await bridgeFixture();
+    const store = createIntentStore({ filename: ':memory:', now: () => start });
+    try {
+        assert.equal(store.status().limit, 100);
+        assert.equal(state.store.status().limit, 100);
+        const classify = createBudgetedIntent({ store, classify: createClassifierClient({ socketPath: state.socketPath }) });
+        await classify('Synthetic new daily-cap question');
+        await classify('SYNTHETIC NEW DAILY-CAP QUESTION?');
+        assert.equal(state.calls(), 1);
+        assert.equal(store.status().remaining, 99);
+        assert.equal(state.store.status().remaining, 99);
+    } finally { store.close(); await state.close(); }
 });
 
 test('worker counts failures without retry and blocks model calls after a usage guard', async () => {

@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { createIntentStore } from './intent-store.mjs';
+import { createIntentStore, maxDailyAiAttempts } from './intent-store.mjs';
 import { createCodexClassifier } from './codex-classifier.mjs';
 import { verifyClassifierCli } from './verify-ai-cli.mjs';
 import { createClassifierServer } from './ai-worker.mjs';
@@ -41,7 +41,7 @@ try {
         ownsSocket = true;
         chmodSync(classifierSocket, 0o600);
         heartbeat(); heartbeatTimer = setInterval(heartbeat, 30000);
-        event({ ready: true, subscriptionAi: true, dailyLimit: 10, customerSending: false, model: 'gpt-6-luna' });
+        event({ ready: true, subscriptionAi: true, dailyLimit: maxDailyAiAttempts, customerSending: false, model: 'gpt-6-luna' });
         await new Promise(resolve => {
             const end = () => { server.close(); server.closeAllConnections(); resolve(); };
             if (controller.signal.aborted) end();

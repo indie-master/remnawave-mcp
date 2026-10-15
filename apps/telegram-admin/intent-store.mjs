@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { validateIntent } from './intent.mjs';
 
+export const maxDailyAiAttempts = 100;
+
 export function normalizeQuestion(text) {
     if (typeof text !== 'string' || text.length < 1 || text.length > 500 || /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|\b\d{5,20}:[A-Za-z0-9_-]{30,}\b|https?:\/\//i.test(text)) throw new Error('AI_TEXT_REJECTED');
     const normalized = text.normalize('NFKC').toLowerCase().replace(/ё/g, 'е').trim().replace(/\s+/g, ' ').replace(/[?!.]+$/, '').trim();
@@ -13,8 +15,8 @@ function moscowDay(timestamp) {
     return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(timestamp));
 }
 
-export function createIntentStore({ filename, dailyLimit = 10, minIntervalMs = 60000, ttlMs = 7 * 86400000, maxEntries = 256, now = Date.now }) {
-    if (!Number.isInteger(dailyLimit) || dailyLimit < 0 || dailyLimit > 10 || !Number.isSafeInteger(minIntervalMs) || minIntervalMs < 60000 || !Number.isSafeInteger(ttlMs) || ttlMs < 1 || !Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 1000)
+export function createIntentStore({ filename, dailyLimit = maxDailyAiAttempts, minIntervalMs = 60000, ttlMs = 7 * 86400000, maxEntries = 256, now = Date.now }) {
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 0 || dailyLimit > maxDailyAiAttempts || !Number.isSafeInteger(minIntervalMs) || minIntervalMs < 60000 || !Number.isSafeInteger(ttlMs) || ttlMs < 1 || !Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 1000)
         throw new Error('INVALID_AI_CONFIGURATION');
     let database;
     try {
@@ -63,7 +65,7 @@ export function createIntentStore({ filename, dailyLimit = 10, minIntervalMs = 6
             try {
                 const last = database.prepare("SELECT value FROM ai_meta WHERE key='last_attempt'").get()?.value;
                 const attempts = database.prepare('SELECT attempts FROM ai_quota WHERE day=?').get(day)?.attempts ?? 0;
-                if (!Number.isSafeInteger(attempts) || attempts < 0 || attempts > 10 || (last !== undefined && !Number.isSafeInteger(last))) throw new Error('AI_STATE_UNAVAILABLE');
+                if (!Number.isSafeInteger(attempts) || attempts < 0 || attempts > maxDailyAiAttempts || (last !== undefined && !Number.isSafeInteger(last))) throw new Error('AI_STATE_UNAVAILABLE');
                 if (last !== undefined && timestamp < last) throw new Error('AI_CLOCK_UNAVAILABLE');
                 if (attempts >= dailyLimit) throw new Error('AI_DAILY_LIMIT');
                 if (last !== undefined && timestamp - last < minIntervalMs) throw new Error('AI_RATE_LIMIT');
@@ -80,7 +82,7 @@ export function createIntentStore({ filename, dailyLimit = 10, minIntervalMs = 6
             const day = moscowDay(timestamp);
             const used = database.prepare('SELECT attempts FROM ai_quota WHERE day=?').get(day)?.attempts ?? 0;
             const cacheEntries = database.prepare('SELECT COUNT(*) AS count FROM intent_cache WHERE expires>?').get(now()).count;
-            if (!Number.isSafeInteger(used) || used < 0 || !Number.isSafeInteger(cacheEntries)) throw new Error('AI_STATE_UNAVAILABLE');
+            if (!Number.isSafeInteger(used) || used < 0 || used > maxDailyAiAttempts || !Number.isSafeInteger(cacheEntries)) throw new Error('AI_STATE_UNAVAILABLE');
             return { day, used, limit: dailyLimit, remaining: Math.max(0, dailyLimit - used), cacheEntries };
         }),
         close: () => database.close(),
