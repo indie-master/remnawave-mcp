@@ -7,3 +7,6 @@ state/
 *.log
 *.sqlite*
 receiver-safety.json
+classifier-paused
+auth.json
+.codex/

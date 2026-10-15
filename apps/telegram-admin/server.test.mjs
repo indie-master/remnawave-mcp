@@ -61,6 +61,12 @@ test('server configuration accepts no AI credentials and rejects incomplete or a
         assert.throws(() => readServerConfig({ ...env, ...override }));
 });
 
+test('subscription mode requires the explicit private socket and separate confirmation', () => {
+    const env = { TELEGRAM_ADMIN_ID: String(owner), BOT_USERNAME: 'example_admin_bot', AI_ENABLED: 'true', AI_SOCKET_PATH: '/bridge/classifier.sock', AI_CONFIRM_SUBSCRIPTION_USAGE: 'true' };
+    assert.equal(readServerConfig(env).aiEnabled, true);
+    for (const override of [{ AI_SOCKET_PATH: 'https://example.invalid' }, { AI_CONFIRM_SUBSCRIPTION_USAGE: 'false' }, { AI_ENABLED: 'yes' }]) assert.throws(() => readServerConfig({ ...env, ...override }));
+});
+
 test('configured service validates HTTPS before reading a token', () => {
     for (const baseUrl of ['http://panel.example.invalid', 'https://user:pass@panel.example.invalid', 'https://panel.example.invalid/path', 'https://panel.example.invalid?query=1', 'not-a-url'])
         assert.throws(() => createConfiguredService({ baseUrl, tokenFile: '/does-not-exist' }), /INVALID_LOCAL_CONFIGURATION/);

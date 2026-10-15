@@ -39,7 +39,9 @@ jobs:
           REMNAWAVE_BASE_URL: https://panel.example.invalid
           BOT_USERNAME: example_admin_bot
           TELEGRAM_ADMIN_ID: '123456789'
-        run: docker compose -f apps/telegram-admin/compose.yaml config --quiet
+        run: |
+          docker compose -f apps/telegram-admin/compose.yaml config --quiet
+          docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml config --quiet
       - uses: docker/setup-buildx-action@v4
       - name: Build without publishing an image
         uses: docker/build-push-action@v7
@@ -78,4 +80,44 @@ jobs:
           await reports.close();
           store.close();
           console.log('Offline runtime budget and MCP checks passed; no network or model requests.');
+          NODE
+      - name: Build isolated AI image without credentials
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/telegram-admin/Dockerfile.ai
+          load: true
+          push: false
+          tags: panel-admin-ai:ci
+      - name: Verify pinned CLI and disabled features offline, without model inference
+        run: |
+          docker run --rm --network none --read-only --tmpfs /home/node/.codex:rw,uid=1000,gid=1000,size=16m --tmpfs /tmp:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-ai:ci --input-type=module -e 'import { verifyClassifierCli } from "/app/apps/telegram-admin/verify-ai-cli.mjs"; verifyClassifierCli({ requireLogin: false }); console.log("Pinned CLI and disabled features verified; no credentials or inference.");'
+          test "$(docker run --rm --network none --entrypoint id panel-admin-ai:ci -u)" = "1000"
+          if docker run --rm --network none panel-admin-ai:ci; then
+            echo "Unexpected AI startup without approval"
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 2
+          fi
+      - name: Exercise the Unix socket and independent quota offline in the AI image
+        run: |
+          docker run --rm -i --network none --read-only --tmpfs /state:rw,uid=1000,gid=1000,size=16m --tmpfs /bridge:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-ai:ci --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createClassifierServer } from '/app/apps/telegram-admin/ai-worker.mjs';
+          import { createClassifierClient } from '/app/apps/telegram-admin/ai-client.mjs';
+          import { createIntentStore } from '/app/apps/telegram-admin/intent-store.mjs';
+          const store = createIntentStore({ filename: '/state/test.sqlite', dailyLimit: 1 });
+          let calls = 0;
+          const server = createClassifierServer({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
+          await new Promise(resolve => server.listen('/bridge/classifier.sock', resolve));
+          const classify = createClassifierClient();
+          assert.deepEqual(await classify('Synthetic report'), { action: 'stats', days: 3 });
+          await assert.rejects(classify('Second report'));
+          assert.equal(calls, 1);
+          assert.equal(store.status().used, 1);
+          server.closeAllConnections();
+          await new Promise(resolve => server.close(resolve));
+          store.close();
+          console.log('Offline socket and worker quota passed; classifier is synthetic.');
           NODE

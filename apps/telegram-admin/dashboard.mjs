@@ -145,6 +145,8 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 throw error;
             } finally { busy = false; }
         } catch (error) {
+            if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
+            if (error?.message === 'AI_UNAVAILABLE') return reply('ИИ временно недоступен или не смог безопасно распознать вопрос. Попытка учтена, автоматического повтора нет. Используйте кнопки или знакомые вопросы.');
             if (error?.message === 'AI_DAILY_LIMIT') return reply('Достигнут суточный лимит обращений к ИИ. Используйте кнопки или уже распознанные вопросы: данные панели будут свежими.');
             if (error?.message === 'AI_RATE_LIMIT' || error?.message === 'AI_BUSY') return reply('Новое обращение к ИИ возможно не чаще раза в минуту. Кнопки и известные вопросы не расходуют бюджет.');
             if (error?.message === 'AI_NOT_CONFIGURED') return reply('Этот вопрос пока не распознан локально, а ИИ ещё не подключён. Используйте кнопки или короткие команды, например «статистика», «проверь ноды».');
