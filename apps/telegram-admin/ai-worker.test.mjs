@@ -79,6 +79,34 @@ test('unknown event and item types fail closed without copying arbitrary type st
     }
 });
 
+test('the exact offline-reproduced disabled-host notice is harmless, but no other warnings or tools are allowed', () => {
+    const message = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
+    const notice = JSON.stringify({ type: 'item.completed', item: { id: 'synthetic', type: 'error', message } });
+    assert.doesNotThrow(() => guardClassifierEvent(notice));
+    assert.deepEqual(decodeClassifierOutput(notice + '\n' + encoded()).intent, { action: 'expiring', days: 7 });
+    assert.throws(() => decodeClassifierOutput(notice), /AI_USAGE_GUARD/);
+    for (const changed of [message + ' PRIVATE_CONTEXT', message.replace('fail closed', 'run tools'), 'Some other startup warning']) {
+        assert.throws(() => guardClassifierEvent(JSON.stringify({ type: 'item.completed', item: { type: 'error', message: changed } })), /AI_UNAVAILABLE/);
+    }
+    for (const type of ['command_execution', 'mcp_tool_call', 'file_change', 'web_search', 'todo_list', 'function_call']) {
+        assert.throws(() => decodeClassifierOutput(notice + '\n' + JSON.stringify({ type: 'item.started', item: { type } }) + '\n' + encoded()), /AI_TOOL_ATTEMPT/);
+    }
+});
+
+test('streaming classifier accepts the reproduced notice without terminating or leaking model text', async () => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = () => assert.fail('No termination is expected');
+    const usage = [];
+    const notice = { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.' } };
+    const classify = createCodexClassifier({ onUsage: value => usage.push(value), spawnProcess: () => {
+        setImmediate(() => { child.stdout.write(JSON.stringify(notice) + '\n' + encoded() + '\n'); child.emit('close', 0, null); });
+        return child;
+    } });
+    assert.deepEqual(await classify('Synthetic question'), { action: 'expiring', days: 7 });
+    assert.equal(usage.length, 1);
+});
+
 test('missing, malformed or unexpectedly large usage triggers the post-call guard', () => {
     for (const usage of [null, {}, { input_tokens: -1, output_tokens: 2 }, { input_tokens: 8001, output_tokens: 1 }, { input_tokens: 1, output_tokens: 1025 }, { input_tokens: 5, output_tokens: 1, cached_input_tokens: 6 }]) assert.throws(() => decodeClassifierOutput(encoded(undefined, usage)), /AI_USAGE_GUARD/);
 });

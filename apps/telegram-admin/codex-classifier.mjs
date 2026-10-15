@@ -7,7 +7,8 @@ import { validateIntent } from './intent.mjs';
 export const codexVersion = '0.162.1';
 export const classifierModel = 'gpt-6-luna';
 const directory = fileURLToPath(new URL('./', import.meta.url));
-export const disabledFeatures = ['shell_tool', 'plugins', 'apps', 'remote_plugin', 'multi_agent', 'multi_agent_v2', 'hooks', 'goals', 'memories', 'shell_snapshot', 'code_mode_host', 'browser_use', 'browser_use_external', 'computer_use', 'image_generation', 'artifact', 'in_app_browser', 'in_app_chat', 'in_app_local_automation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'tool_suggest', 'view_image', 'sleep_tool', 'recommended_plugins', 'request_permissions_tool', 'unbounded_connection_retries', 'daemon_auto_start', 'fast_mode', 'ultrafast_mode'];
+export const disabledFeatures = ['shell_tool', 'plugins', 'apps', 'remote_plugin', 'multi_agent', 'multi_agent_v2', 'hooks', 'goals', 'memories', 'shell_snapshot', 'code_mode', 'code_mode_only', 'code_mode_host', 'browser_use', 'browser_use_external', 'computer_use', 'image_generation', 'artifact', 'in_app_browser', 'in_app_chat', 'in_app_local_automation', 'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'tool_suggest', 'view_image', 'sleep_tool', 'recommended_plugins', 'request_permissions_tool', 'unbounded_connection_retries', 'daemon_auto_start', 'fast_mode', 'ultrafast_mode'];
+const disabledCodeModeNotice = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
 
 const diagnosticReasons = ['TOOL_ATTEMPT', 'CLI_WARNING', 'UNEXPECTED_ITEM', 'INVALID_JSONL', 'UNEXPECTED_EVENT', 'INVALID_ANSWER', 'MISSING_USAGE', 'INVALID_USAGE', 'INPUT_LIMIT', 'OUTPUT_LIMIT', 'OUTPUT_SIZE', 'PROCESS_EXIT', 'PROCESS_START', 'TIMEOUT', 'CANCELLED', 'MODEL_UNAVAILABLE', 'AUTH_UNAVAILABLE', 'TRANSPORT_UNAVAILABLE', 'CONFIG_UNAVAILABLE', 'PERMISSION_DENIED', 'CLASSIFIER_UNAVAILABLE'];
 const toolItemTypes = ['command_execution', 'mcp_tool_call', 'web_search', 'file_change', 'collab_tool_call', 'function_call', 'todo_list'];
@@ -52,6 +53,7 @@ export function guardClassifierEvent(line) {
         const details = { eventType: event.type, itemType: ['reasoning', 'agent_message', 'error', ...toolItemTypes].includes(itemType) ? itemType : 'unknown' };
         if (itemType === 'error') {
             const message = typeof event.item.message === 'string' ? event.item.message.slice(0, 8192) : '';
+            if (event.type === 'item.completed' && message === disabledCodeModeNotice) return event;
             const warningCode = /^Under-development features enabled:/i.test(message) ? 'DEVELOPMENT_FEATURES' : /model metadata|model information.*not found/i.test(message) ? 'MODEL_METADATA' : /^model rerouted:/i.test(message) ? 'MODEL_REROUTED' : /config|instructions|feature/i.test(message) ? 'CONFIG_WARNING' : 'OTHER_WARNING';
             const hint = failureHint(message);
             throw classifierFailure(hint === 'CLASSIFIER_UNAVAILABLE' ? 'CLI_WARNING' : hint, { ...details, warningCode });
@@ -80,6 +82,7 @@ export function decodeClassifierOutput(raw) {
         const event = guardClassifierEvent(line);
         if (['thread.started', 'turn.started'].includes(event?.type)) continue;
         if (['item.started', 'item.updated', 'item.completed'].includes(event?.type)) {
+            if (event.item?.type === 'error') continue;
             if (!['reasoning', 'agent_message'].includes(event.item?.type)) throw classifierFailure('TOOL_ATTEMPT');
             if (event.type === 'item.completed' && event.item.type === 'agent_message') {
                 if (answer !== undefined || typeof event.item.text !== 'string' || event.item.text.length > 256) throw classifierFailure('INVALID_ANSWER');
