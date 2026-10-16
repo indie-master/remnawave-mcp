@@ -1,0 +1,6 @@
+**
+!apps/
+!apps/telegram-admin/
+!apps/telegram-admin/voice-worker.py
+!apps/telegram-admin/Dockerfile.voice
+!apps/telegram-admin/Dockerfile.voice.dockerignore

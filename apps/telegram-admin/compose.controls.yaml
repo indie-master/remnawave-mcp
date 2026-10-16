@@ -1,0 +1,5 @@
+services:
+  bot:
+    environment:
+      AI_DAILY_LIMIT: ${AI_DAILY_LIMIT:-100}
+      PANEL_ALLOWED_REPORTS: ${PANEL_ALLOWED_REPORTS:-all}

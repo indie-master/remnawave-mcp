@@ -18,6 +18,7 @@
     "list-tools": "node dist/index.js --list-tools",
     "list-tools:all": "node dist/index.js --list-tools --all",
     "test": "node --test \"test/*.test.mjs\"",
+    "test:bot": "node --test \"apps/telegram-admin/*.test.mjs\"",
     "pack:mcpb": "node scripts/build-mcpb.mjs"
   },
   "keywords": [
