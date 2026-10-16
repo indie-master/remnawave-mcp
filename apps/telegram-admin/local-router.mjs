@@ -56,6 +56,13 @@ export function resolveLocalRequest(text, { context } = {}) {
     }
     const followup = periodOf(phrase);
     if (followup) return context?.action === 'expiring' ? plan('expiring', followup) : clarify('period');
+    if (/^(?:за|на|до|после|через|с|в течение) /.test(phrase) && /(?:\d|день|дня|дней|сутки|недел|месяц)/.test(phrase)) return clarify('period');
+    if (/^\d/.test(phrase)) return clarify('period');
+    if (/^(?:офлайн|всего|подробнее)$/.test(phrase)) {
+        if (['nodes', 'node_details'].includes(context?.action)) return plan(phrase === 'подробнее' ? 'node_details' : 'nodes');
+        if (phrase === 'всего' && ['stats', 'users', 'online'].includes(context?.action)) return plan('users');
+        return clarify('scope');
+    }
     if (/(?:статистик|пользоват|юзер|клиент|нод|сервер|подписк|онлайн|профил|сквад|трафик|хост)/.test(phrase)) return clarify('scope');
     return null;
 }

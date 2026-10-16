@@ -67,6 +67,10 @@ test('writes stay blocked and context-dependent periods never become global cach
     assert.equal(resolveLocalRequest('а онлайн?', { context: { action: 'nodes' } }).intent.action, 'nodes');
     assert.equal(resolveLocalRequest('а онлайн?', { context: { action: 'users' } }).intent.action, 'online');
     assert.equal(resolveLocalRequest('а онлайн?').kind, 'clarify');
+    assert.equal(resolveLocalRequest('а офлайн?', { context: { action: 'nodes' } }).intent.action, 'nodes');
+    assert.equal(resolveLocalRequest('а всего?', { context: { action: 'online' } }).intent.action, 'users');
+    assert.equal(resolveLocalRequest('а подробнее?', { context: { action: 'nodes' } }).intent.action, 'node_details');
+    for (const phrase of ['а за 2 дня?', 'а за 21 день?', 'а до 15 октября?', '15.10.2026', 'а офлайн?']) assert.equal(resolveLocalRequest(phrase, { context: { action: 'users' } }).kind, 'clarify', phrase);
 });
 
 function reportsFixture() {
