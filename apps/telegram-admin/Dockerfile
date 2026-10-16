@@ -16,7 +16,12 @@ COPY apps/telegram-admin/panel-service.mjs apps/telegram-admin/configured-servic
 COPY apps/telegram-client/telegram-api.mjs ./apps/telegram-client/
 COPY apps/telegram-admin/ai-client.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/runtime-controls.mjs apps/telegram-admin/ops-config.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/extensions.mjs apps/telegram-admin/voice-client.mjs apps/telegram-admin/admin-users.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/business-client.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/state-transfer.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/admin-mcp.mjs apps/telegram-admin/start-admin-mcp.mjs ./apps/telegram-admin/
+COPY apps/business/config.mjs ./apps/business/
 COPY apps/telegram-admin/local-router.mjs apps/telegram-admin/extra-reports.mjs apps/telegram-admin/extra-views.mjs apps/telegram-admin/menu-session.mjs ./apps/telegram-admin/
-RUN mkdir /state && chown node:node /state
+RUN mkdir /state /voice /business-bridge && chown node:node /state /voice /business-bridge
 USER node
 ENTRYPOINT ["node", "/app/apps/telegram-admin/start-server.mjs"]

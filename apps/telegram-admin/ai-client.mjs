@@ -7,12 +7,13 @@ export const classifierSocket = '/bridge/classifier.sock';
 
 export function createClassifierClient({ socketPath = classifierSocket, signal } = {}) {
     if (!isAbsolute(socketPath) || socketPath.length > 200) throw new Error('INVALID_AI_CONFIGURATION');
-    const send = (text, health = false) => {
+    const send = (text, mode = 'classify') => {
+        const health = mode !== 'classify';
         const unavailable = health ? 'AI_BRIDGE_UNAVAILABLE' : 'AI_UNAVAILABLE';
         if (signal?.aborted) return Promise.reject(new Error(unavailable));
         return new Promise((resolve, reject) => {
             const body = health ? undefined : JSON.stringify({ question: text });
-            const connection = request({ socketPath, path: health ? '/health' : '/classify', method: health ? 'GET' : 'POST', agent: false, headers: body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}, signal }, response => {
+            const connection = request({ socketPath, path: `/${mode}`, method: health ? 'GET' : 'POST', agent: false, headers: body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}, signal }, response => {
                 const chunks = [];
                 let size = 0;
                 response.on('data', chunk => {
@@ -29,6 +30,10 @@ export function createClassifierClient({ socketPath = classifierSocket, signal }
                             reject(new Error(code)); return;
                         }
                         if (health) {
+                            if (mode === 'usage') {
+                                if (Object.keys(value).sort().join(',') !== 'cacheEntries,day,limit,remaining,used' || !/^\d{4}-\d{2}-\d{2}$/.test(value.day) || ['used', 'limit', 'remaining'].some(key => !Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > 100) || !Number.isSafeInteger(value.cacheEntries)) throw new Error(unavailable);
+                                resolve(value); return;
+                            }
                             if (Object.keys(value).join(',') !== 'ready' || value.ready !== true) throw new Error(unavailable);
                             resolve();
                         } else resolve(validateIntent(value));
@@ -42,6 +47,7 @@ export function createClassifierClient({ socketPath = classifierSocket, signal }
         });
     };
     const classify = text => { normalizeQuestion(text); return send(text); };
-    classify.checkReady = () => send(undefined, true);
+    classify.checkReady = () => send(undefined, 'health');
+    classify.usage = () => send(undefined, 'usage');
     return classify;
 }

@@ -8,6 +8,10 @@ import { createIntentStore } from './intent-store.mjs';
 import { createBudgetedIntent } from './budgeted-intent.mjs';
 import { createRunSafety, waitForOperator } from './run-safety.mjs';
 import { createClassifierClient } from './ai-client.mjs';
+import { readExtensions } from './extensions.mjs';
+import { createVoiceInput } from './voice-client.mjs';
+import { createUserClient, createUserAdministration, createAdminHandler } from './admin-users.mjs';
+import { createBusinessAdmin } from './business-client.mjs';
 
 const controller = new AbortController();
 const stop = () => controller.abort();
@@ -15,6 +19,7 @@ let timer;
 let safety;
 let intentStore;
 let reports;
+let administration;
 const event = data => process.stdout.write(JSON.stringify({ observedAt: new Date().toISOString(), ...data }) + '\n');
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
@@ -33,23 +38,32 @@ async function main() {
         return;
     }
     const config = readServerConfig(process.env);
+    const extensions = readExtensions(process.env);
     const service = createConfiguredService({ baseUrl: config.baseUrl, tokenFile: config.panelTokenFile, usersEnabled: config.usersEnabled, allowedReports: config.allowedReports, signal: controller.signal });
     if (statSync(config.telegramTokenFile).size > 4096) throw new Error('INVALID_LOCAL_CREDENTIAL');
     const token = readFileSync(config.telegramTokenFile, 'utf8').trim();
     const apiOptions = { token, allowedUserId: config.allowedUserId, enableButtons: true };
     const api = createTelegramApi({ ...apiOptions, signal: controller.signal });
     const finalApi = createTelegramApi(apiOptions);
+    if (extensions.adminRead) administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile, signal: controller.signal }), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields });
+    const userHandler = administration ? createAdminHandler({ administration, actorId: config.allowedUserId }) : undefined;
+    const businessHandler = extensions.business ? createBusinessAdmin({ actorId: config.allowedUserId, administration }) : undefined;
     const offsetFile = join(config.stateDirectory, 'offset.json');
     const heartbeatFile = join(config.stateDirectory, 'heartbeat.json');
     let classify;
+    let aiClient;
     try {
         intentStore = createIntentStore({ filename: join(config.stateDirectory, 'intent-cache.sqlite'), dailyLimit: config.dailyLimit });
-        const external = config.aiEnabled ? createClassifierClient({ signal: controller.signal }) : undefined;
-        classify = createBudgetedIntent({ store: intentStore, classify: external, onEvent: event });
+        aiClient = config.aiEnabled ? createClassifierClient({ signal: controller.signal }) : undefined;
+        classify = createBudgetedIntent({ store: intentStore, classify: aiClient, onEvent: event });
     } catch { event({ event: 'intent', ok: false, code: 'AI_STATE_UNAVAILABLE' }); }
     const result = await runServerBot({
         ...options, api, service, allowedUserId: config.allowedUserId, botUsername: config.botUsername, signal: controller.signal,
-        classify, budgetStatus: intentStore?.status, enhancedUi: config.enhancedUi, aiEnabled: config.aiEnabled && !!classify,
+        classify, budgetStatus: intentStore ? async () => { const local = intentStore.status(); try { return { ...local, shared: await aiClient?.usage() }; } catch { return local; } } : undefined, enhancedUi: config.enhancedUi, aiEnabled: config.aiEnabled && !!classify,
+        autoMenu: extensions.autoMenu,
+        extraButtons: [...(userHandler ? [[{ text: '👤 Найти пользователя', callback_data: 'admin_home' }]] : []), ...(businessHandler ? [[{ text: '💳 Оплаты и продления', callback_data: 'business_home' }]] : [])],
+        voiceInput: extensions.voice ? createVoiceInput({ api, allowedUserId: config.allowedUserId, maxSeconds: extensions.voiceSeconds, maxBytes: extensions.voiceBytes }) : undefined,
+        adminHandle: userHandler || businessHandler ? async request => (await userHandler?.(request)) ?? (await businessHandler?.(request)) : undefined,
         textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${config.dailyLimit} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
         mcpRead: classify ? async (action, days) => {
             if (controller.signal.aborted) throw new Error('STOP_REQUESTED');
@@ -94,6 +108,7 @@ try {
     controller.abort();
     await reports?.close();
     intentStore?.close();
+    administration?.close();
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
 }

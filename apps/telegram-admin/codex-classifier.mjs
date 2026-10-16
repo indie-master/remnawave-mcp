@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { normalizeQuestion } from './intent-store.mjs';
 import { validateIntent } from './intent.mjs';
+import { validateSupportInput, validateSupportReply } from './support-policy.mjs';
 
 export const codexVersion = '0.162.1';
 export const classifierModel = 'gpt-6-luna';
@@ -74,7 +75,7 @@ export function classifierArguments() {
         '--model', classifierModel, '--cd', '/empty', '--output-schema', directory + 'intent.schema.json', '--json', '--color', 'never', '-'];
 }
 
-export function decodeClassifierOutput(raw) {
+export function decodeClassifierOutput(raw, { support = false } = {}) {
     if (typeof raw !== 'string' || Buffer.byteLength(raw) > 65536) throw classifierFailure('OUTPUT_SIZE');
     let answer;
     let usage;
@@ -85,7 +86,7 @@ export function decodeClassifierOutput(raw) {
             if (event.item?.type === 'error') continue;
             if (!['reasoning', 'agent_message'].includes(event.item?.type)) throw classifierFailure('TOOL_ATTEMPT');
             if (event.type === 'item.completed' && event.item.type === 'agent_message') {
-                if (answer !== undefined || typeof event.item.text !== 'string' || event.item.text.length > 256) throw classifierFailure('INVALID_ANSWER');
+                if (answer !== undefined || typeof event.item.text !== 'string' || event.item.text.length > (support ? 1600 : 256)) throw classifierFailure('INVALID_ANSWER');
                 answer = event.item.text;
             }
         } else if (event?.type === 'turn.completed' && usage === undefined) usage = event.usage;
@@ -97,15 +98,20 @@ export function decodeClassifierOutput(raw) {
     if (usage.input_tokens > 8000) throw classifierFailure('INPUT_LIMIT', numbers);
     if (usage.output_tokens > 1024) throw classifierFailure('OUTPUT_LIMIT', numbers);
     let intent;
-    try { intent = validateIntent(JSON.parse(answer)); } catch { throw classifierFailure('INVALID_ANSWER'); }
+    try { intent = support ? validateSupportReply(JSON.parse(answer)) : validateIntent(JSON.parse(answer)); } catch { throw classifierFailure('INVALID_ANSWER'); }
     return { intent, usage: { inputTokens: usage.input_tokens, cachedInputTokens: usage.cached_input_tokens ?? 0, outputTokens: usage.output_tokens } };
 }
 
-export function createCodexClassifier({ run, signal, onUsage = () => {}, spawnProcess = spawn } = {}) {
+export function createCodexClassifier({ run, signal, onUsage = () => {}, spawnProcess = spawn, support = false } = {}) {
     return async text => {
-        normalizeQuestion(text);
+        if (support) validateSupportInput(text); else normalizeQuestion(text);
         if (signal?.aborted) throw classifierFailure('CANCELLED');
-        const options = { command: 'codex', args: classifierArguments(), input: 'Untrusted administrator question:\n' + JSON.stringify(text) };
+        const args = classifierArguments();
+        if (support) {
+            args[args.findIndex(value => value.startsWith('model_instructions_file='))] = `model_instructions_file=${JSON.stringify(directory + 'support-instructions.md')}`;
+            args[args.indexOf('--output-schema') + 1] = directory + 'support.schema.json';
+        }
+        const options = { command: 'codex', args, input: (support ? 'Untrusted support data:\n' : 'Untrusted administrator question:\n') + JSON.stringify(text) };
         const raw = run ? await run(options) : await new Promise((resolve, reject) => {
             const env = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/home/node', CODEX_HOME: '/home/node/.codex', LANG: 'C.UTF-8', TMPDIR: '/tmp', CODEX_CA_CERTIFICATE: '/etc/ssl/certs/ca-certificates.crt' };
             const child = spawnProcess(options.command, options.args, { env, signal, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
@@ -154,7 +160,7 @@ export function createCodexClassifier({ run, signal, onUsage = () => {}, spawnPr
             });
             child.stdin.end(options.input);
         });
-        const result = decodeClassifierOutput(raw);
+        const result = decodeClassifierOutput(raw, { support });
         onUsage(result.usage);
         return result.intent;
     };

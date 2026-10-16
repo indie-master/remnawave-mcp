@@ -2,13 +2,18 @@ import { createServer } from 'node:http';
 import { validateIntent } from './intent.mjs';
 import { normalizeQuestion } from './intent-store.mjs';
 import { classifierDiagnostic } from './codex-classifier.mjs';
+import { validateSupportInput, validateSupportReply } from './support-policy.mjs';
 
-export function createClassifierServer({ store, classify, paused = () => false, pause = () => {}, onEvent = () => {} }) {
+export function createClassifierServer({ store, classify, support, paused = () => false, pause = () => {}, onEvent = () => {} }) {
     let busy = false;
     let failed = false;
     const isPaused = () => failed || paused();
     const server = createServer(async (request, response) => {
         const send = (status, value) => { if (!response.destroyed) response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
+        if (request.method === 'GET' && request.url === '/usage') {
+            try { send(200, store.status()); } catch { send(503, { code: 'AI_STATE_UNAVAILABLE' }); }
+            return;
+        }
         if (request.method === 'GET' && request.url === '/health') {
             if (isPaused()) send(503, { ready: false, code: 'AI_PAUSED' });
             else if (busy) send(429, { ready: false, code: 'AI_BUSY' });
@@ -16,7 +21,8 @@ export function createClassifierServer({ store, classify, paused = () => false, 
             return;
         }
         if (isPaused()) { send(503, { code: 'AI_PAUSED' }); request.resume(); return; }
-        if (request.method !== 'POST' || request.url !== '/classify' || request.headers['content-type'] !== 'application/json') { send(503, { code: 'AI_UNAVAILABLE' }); request.resume(); return; }
+        const supportRequest = request.url === '/support' && typeof support === 'function';
+        if (request.method !== 'POST' || (!supportRequest && request.url !== '/classify') || request.headers['content-type'] !== 'application/json') { send(503, { code: 'AI_UNAVAILABLE' }); request.resume(); return; }
         if (busy) { send(429, { code: 'AI_BUSY' }); request.resume(); return; }
         busy = true;
         const controller = new AbortController();
@@ -31,14 +37,17 @@ export function createClassifierServer({ store, classify, paused = () => false, 
                 chunks.push(chunk);
             }
             const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            if (!value || Object.keys(value).join(',') !== 'question') throw new Error('AI_TEXT_REJECTED');
-            normalizeQuestion(value.question);
+            if (supportRequest) validateSupportInput(value);
+            else {
+                if (!value || Object.keys(value).join(',') !== 'question') throw new Error('AI_TEXT_REJECTED');
+                normalizeQuestion(value.question);
+            }
             if (controller.signal.aborted || isPaused()) throw new Error('AI_UNAVAILABLE');
             store.reserve();
             attempted = true;
-            const intent = validateIntent(await classify(value.question, controller.signal));
+            const intent = supportRequest ? validateSupportReply(await support(value, controller.signal)) : validateIntent(await classify(value.question, controller.signal));
             send(200, intent);
-            onEvent({ event: 'classification', ok: true });
+            onEvent({ event: supportRequest ? 'support' : 'classification', ok: true });
         } catch (error) {
             let pausePersisted = false;
             if (attempted) {

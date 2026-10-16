@@ -1,0 +1,33 @@
+name: panel-admin-media
+services:
+  media:
+    image: panel-admin-media:local
+    build:
+      context: ../..
+      dockerfile: apps/business/Dockerfile.media
+    network_mode: none
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.75
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 48
+    volumes: ["media-bridge:/media-bridge"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=48m,mode=1777"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; connection=socket.socket(socket.AF_UNIX); connection.settimeout(2); connection.connect('/media-bridge/analyze.sock'); connection.close()"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: local
+      options: {max-size: 5m, max-file: "3"}
+volumes:
+  media-bridge:
+    external: true
+    name: panel-admin-business_media-bridge

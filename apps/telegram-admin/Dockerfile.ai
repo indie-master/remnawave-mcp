@@ -7,6 +7,7 @@ COPY apps/telegram-admin/intent.mjs apps/telegram-admin/intent-store.mjs apps/te
 COPY apps/telegram-admin/verify-ai-cli.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/extra-reports.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/runtime-controls.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/support-policy.mjs apps/telegram-admin/support-instructions.md apps/telegram-admin/support.schema.json ./apps/telegram-admin/
 COPY apps/telegram-admin/ai-login.mjs apps/telegram-admin/ai-state-control.mjs ./apps/telegram-admin/
 RUN mkdir /state /bridge /empty /home/node/.codex && chown node:node /state /bridge /home/node/.codex && chmod 700 /state /bridge /home/node/.codex
 USER node

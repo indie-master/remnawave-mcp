@@ -1,0 +1,1 @@
+{"type":"object","properties":{"reply":{"type":"string","maxLength":1200},"needsHuman":{"type":"boolean"}},"required":["reply","needsHuman"],"additionalProperties":false}

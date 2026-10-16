@@ -3,6 +3,9 @@
 !apps/telegram-admin/
 !apps/telegram-admin/intent.mjs
 !apps/telegram-admin/runtime-controls.mjs
+!apps/telegram-admin/support-policy.mjs
+!apps/telegram-admin/support-instructions.md
+!apps/telegram-admin/support.schema.json
 !apps/telegram-admin/extra-reports.mjs
 !apps/telegram-admin/intent-store.mjs
 !apps/telegram-admin/panel-service.mjs

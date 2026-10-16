@@ -9,7 +9,7 @@ const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     signal?.addEventListener('abort', finish, { once: true });
 });
 
-export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
+export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, autoMenu = false, voiceInput, adminHandle, extraButtons = [], aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
     if (soleReceiverConfirmed !== true || typeof continuous !== 'boolean' || !Number.isInteger(seconds) || seconds < 60 || seconds > 900) throw new Error('LIVE_START_NOT_AUTHORIZED');
     const result = { status: 'stopped', reason: null, replies: 0, polls: 0, startedAt: null, stoppedAt: null };
     let ready = false;
@@ -35,12 +35,13 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
             if (signal?.aborted || now() >= deadline) throw new Error('STOP_REQUESTED');
             return mcpRead(action, days);
         } : undefined;
-        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
-        const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
+        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, adminHandle, extraButtons, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
+        const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, collapsible: autoMenu, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
         await api.sendReply(notification(continuous
             ? 'Бот запущен на сервере. Кнопки работают без ИИ. Отправка клиентам отключена.'
             : `Тест бота начался на ${seconds / 60} мин. Остановка: ${new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', timeStyle: 'medium' }).format(new Date(deadline))} МСК. Кнопки работают без ИИ, отправка клиентам отключена.`));
         result.replies++;
+        if (menuSession && autoMenu) result.replies += await menuSession.open(handle.home());
         ready = true;
         heartbeat();
         onReady({ ready: true, continuous, maxSeconds: continuous ? null : seconds, subscriptionAi: aiEnabled, cachedText: !!classify, enhancedUi, customerSending: false, startedAt: result.startedAt });
@@ -66,13 +67,19 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
                 offset = update.update_id + 1;
                 await saveOffset(offset);
                 try {
-                    if (menuSession) result.replies += await menuSession.process(update);
+                    const input = voiceInput ? await voiceInput(update) : update;
+                    if (!input) continue;
+                    if (menuSession) result.replies += await menuSession.process(input);
                     else {
-                        const reply = await handle(update);
+                        const reply = await handle(input);
                         if (reply && !signal?.aborted && now() < deadline) { await api.sendReply(reply); result.replies++; }
                     }
                 } catch (error) {
                         if (signal?.aborted) break;
+                        if (['VOICE_REJECTED', 'VOICE_UNAVAILABLE', 'VOICE_UNCERTAIN'].includes(error?.message)) {
+                            await api.sendReply(notification('Голос не распознан уверенно или превышает ограничения. Повторите коротко либо используйте кнопки. Внешнее распознавание речи не использовалось.'));
+                            result.replies++; continue;
+                        }
                         if (error?.code !== 'NETWORK_FAILED') throw error;
                         onEvent({ event: 'delivery', ok: false, code: 'DELIVERY_UNCERTAIN' });
                 }

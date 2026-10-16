@@ -64,6 +64,20 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
     }
 
     return {
+        downloadVoice: async (fileId, maximum = 1048576) => {
+            if (typeof fileId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(fileId) || !Number.isSafeInteger(maximum) || maximum < 16 || maximum > 2097152) throw new TelegramError('VOICE_REJECTED');
+            const file = await call('getFile', { file_id: fileId });
+            if (!Number.isSafeInteger(file?.file_size) || file.file_size > maximum || typeof file.file_path !== 'string' || !/^voice\/[A-Za-z0-9_-]+\.(?:oga|ogg)$/.test(file.file_path)) throw new TelegramError('VOICE_REJECTED');
+            let response;
+            try { response = await fetchImpl(`https://api.telegram.org/file/bot${token}/${file.file_path}`, { redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000) }); }
+            catch { throw new TelegramError('VOICE_UNAVAILABLE'); }
+            if (!response.ok || Number(response.headers.get('content-length')) > maximum || !response.body) { await response.body?.cancel(); throw new TelegramError('VOICE_REJECTED'); }
+            const chunks = []; let length = 0;
+            try {
+                for await (const chunk of response.body) { length += chunk.length; if (length > maximum) throw new Error(); chunks.push(chunk); }
+            } catch { throw new TelegramError('VOICE_REJECTED'); }
+            return Buffer.concat(chunks);
+        },
         getMe: () => call('getMe', {}),
         getWebhookInfo: () => call('getWebhookInfo', {}),
         getUpdates: async offset => {
@@ -80,13 +94,13 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
             const fields = enableButtons ? ['chat_id', 'text', 'protect_content', 'parse_mode', 'reply_markup'] : ['chat_id', 'text', 'protect_content'];
             if (!payload || payload.chat_id !== allowedUserId || payload.protect_content !== true || typeof payload.text !== 'string' || payload.text.length < 1 || payload.text.length > 4096 || Object.keys(payload).some(key => !fields.includes(key)) || (payload.parse_mode !== undefined && payload.parse_mode !== 'HTML') || (payload.reply_markup !== undefined && !safeKeyboard(payload.reply_markup)))
                 throw new TelegramError('REPLY_BLOCKED');
-            return call('sendMessage', { ...payload, chat_id: allowedUserId, protect_content: true });
+            return call('sendMessage', { ...payload, chat_id: allowedUserId, protect_content: true, link_preview_options: { is_disabled: true } });
         },
         ...(enableButtons ? { editReply: async payload => {
             const fields = ['chat_id', 'message_id', 'text', 'protect_content', 'parse_mode', 'reply_markup'];
             if (!payload || payload.chat_id !== allowedUserId || payload.protect_content !== true || !Number.isSafeInteger(payload.message_id) || payload.message_id <= 0 || typeof payload.text !== 'string' || payload.text.length < 1 || payload.text.length > 4096 || Object.keys(payload).some(key => !fields.includes(key)) || (payload.parse_mode !== undefined && payload.parse_mode !== 'HTML') || (payload.reply_markup !== undefined && !safeKeyboard(payload.reply_markup))) throw new TelegramError('REPLY_BLOCKED');
             const { protect_content, ...body } = payload;
-            try { return await call('editMessageText', body); }
+            try { return await call('editMessageText', { ...body, link_preview_options: { is_disabled: true } }); }
             catch (error) { if (error?.code !== 'EDIT_NOT_MODIFIED') throw error; }
         }, answerCallback: async (id, text) => {
             if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id) || (text !== undefined && (typeof text !== 'string' || text.length > 200))) throw new TelegramError('CALLBACK_BLOCKED');

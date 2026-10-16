@@ -22,7 +22,7 @@ const extendedMenu = keyboard([
     [button('ℹ️ Версия', 'q:version'), button('🧠 Лимит ИИ', 'budget')],
 ]);
 
-export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
+export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, adminHandle, extraButtons = [], answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
     if (!Number.isSafeInteger(allowedUserId) || allowedUserId <= 0) throw new Error('INVALID_ADMIN_ID');
     const reports = new Map();
     const drafts = new Map();
@@ -31,6 +31,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     let busy = false;
     let context;
     const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
+    const home = () => reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (textModeDescription ?? (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.')) + '\nУведомления: только черновики администратору.', keyboard([...(enhancedUi ? extendedMenu : menu).inline_keyboard, ...extraButtons]));
     function clarification(topic) {
         const rows = topic === 'period'
             ? [[1, 3, 7].map(days => button(`${days} дн.`, `q:expiring:${days}`)), [14, 30].map(days => button(`${days} дн.`, `q:expiring:${days}`))]
@@ -94,7 +95,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         return reply(lines.join('\n'), keyboard([[button('🔄 Проверить заново', `q:${action}`), button('🏠 Меню', 'home')]]));
     }
 
-    return async update => {
+    const handle = async update => {
         const callback = update?.callback_query;
         const message = callback?.message ?? update?.message;
         const from = callback?.from ?? message?.from;
@@ -117,11 +118,15 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         try {
             const data = callback?.data;
             const text = callback ? '' : message.text.trim();
-            if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (textModeDescription ?? (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.')) + '\nУведомления: только черновики администратору.');
+            if (adminHandle) {
+                const result = await adminHandle({ text, data, allowedUserId });
+                if (result) return reply(result.text, result.reply_markup);
+            }
+            if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return home();
             if (data === 'budget' || text === '/budget') {
                 if (!budgetStatus) return reply('Учёт ИИ недоступен. Кнопки работают без ИИ.');
-                const budget = budgetStatus();
-                return reply(`<b>🧠 Лимит ИИ</b>\nСутки: ${escapeHtml(budget.day)} МСК\nПопыток: ${budget.used}/${budget.limit}\nОсталось: ${budget.remaining}\nСохранённых команд: ${budget.cacheEntries}\n\nКнопки, локальные команды и повторения из кеша не расходуют лимит. Ошибки ИИ учитываются. Это счётчик вызовов нашего бота, не остаток подписки ChatGPT.`);
+                const budget = await budgetStatus();
+                return reply(`<b>🧠 Лимит ИИ</b>\nСутки: ${escapeHtml(budget.day)} МСК\nПопыток: ${budget.used}/${budget.limit}\nОсталось: ${budget.remaining}\nСохранённых команд: ${budget.cacheEntries}${budget.shared ? `\n\nОбщий ИИ: бот + поддержка\nПопыток: ${budget.shared.used}/${budget.shared.limit}\nОсталось всего: ${budget.shared.remaining}` : ''}\n\nКнопки, локальные команды и повторения из кеша не расходуют лимит. Ошибки ИИ учитываются. Это счётчик вызовов нашего проекта, не остаток подписки ChatGPT.`);
             }
             if (data === 'periods' || text === '/expiring') return reply('За какой период проверить подписки?', keyboard([
                 ...[[1, 3, 7], [14, 30]].map(days => days.map(day => button(`${day} дн.`, `q:expiring:${day}`))),
@@ -215,4 +220,5 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             return reply('Данные недоступны или запрос не поддерживается. Проверьте токен, права чтения и доступность ИИ. Изменения не выполнялись.');
         }
     };
+    return Object.assign(handle, { home });
 }

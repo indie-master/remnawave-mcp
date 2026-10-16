@@ -7,6 +7,9 @@ services:
     volumes:
       - ai-bridge:/bridge
   ai:
+    env_file:
+      - path: ./.env.extensions
+        required: false
     image: panel-admin-ai:local
     build:
       context: ../..

@@ -1,6 +1,9 @@
 name: panel-admin-bot
 services:
   bot:
+    env_file:
+      - path: ./.env.extensions
+        required: false
     image: panel-admin-bot:local
     build:
       context: ../..
@@ -33,6 +36,8 @@ services:
       - panel_api_token
     volumes:
       - bot-state:/state
+      - voice-bridge:/voice:ro
+      - business-bridge:/business-bridge:ro
     healthcheck:
       test: ["CMD", "node", "/app/apps/telegram-admin/healthcheck.mjs"]
       interval: 30s
@@ -51,3 +56,5 @@ secrets:
     file: ./secrets/panel-api-token.txt
 volumes:
   bot-state:
+  voice-bridge:
+  business-bridge:

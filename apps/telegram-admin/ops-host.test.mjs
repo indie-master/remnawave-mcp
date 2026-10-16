@@ -19,18 +19,18 @@ function fixture() {
     const app = join(root, 'apps', 'telegram-admin');
     const bin = join(root, 'mock-bin');
     mkdirSync(app, { recursive: true }); mkdirSync(bin);
-    for (const filename of ['botctl', 'ops-host.sh']) { copyFileSync(join(directory, filename), join(app, filename)); chownSync(join(app, filename), 0, 0); chmodSync(join(app, filename), 0o755); }
+    for (const filename of ['botctl', 'ops-host.sh', 'extensions.env.example']) { copyFileSync(join(directory, filename), join(app, filename)); chownSync(join(app, filename), 0, 0); chmodSync(join(app, filename), 0o755); }
     writeFileSync(join(app, '.env'), base, { mode: 0o600 });
     const log = join(root, 'commands.jsonl');
     const docker = `#!/usr/bin/env node
 import fs from 'node:fs';
-import { validateBaseConfiguration, validateControlConfiguration } from ${JSON.stringify(new URL('./ops-config.mjs', import.meta.url).href)};
+import { validateBaseConfiguration, validateControlConfiguration, validateExtensionConfiguration } from ${JSON.stringify(new URL('./ops-config.mjs', import.meta.url).href)};
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.MOCK_LOG, JSON.stringify(args)+'\\n');
 if(args[0]!=='--host'||args[1]!=='unix:///var/run/docker.sock')process.exit(90);
 args.splice(0,2);
 const command=args[0];
-if(command==='ps'){console.log(args.includes('-aq')?'aaaaaaaaaaaa\\nbbbbbbbbbbbb':'Synthetic project healthy');}
+if(command==='ps'){if(args.some(value=>/com.docker.compose.project=panel-admin-(voice|media|business)/.test(value)))console.log('');else console.log(args.includes('-aq')?'aaaaaaaaaaaa\\nbbbbbbbbbbbb':'Synthetic project healthy');}
 else if(command==='inspect'){
  const identifier=args.at(-1);const ai=identifier==='bbbbbbbbbbbb';
  const template=args[2];
@@ -41,7 +41,7 @@ else if(command==='inspect'){
 else if(command==='run'){
  if(process.env.MOCK_VALIDATION_FAIL)process.exit(2);
  const mount=args[args.indexOf('--mount')+1];const filename=mount.match(/src=([^,]+)/)[1];
- try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
+ try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else if(args.at(-2)==='extensions')validateExtensionConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
 }else if(command==='compose'){if(args.includes('build')&&process.env.MOCK_BUILD_FAIL)process.exit(2);}
 else if(command==='image'){if(process.env.MOCK_IMAGE_GONE)process.exit(2);}
 else if(!['tag','stop','logs'].includes(command))process.exit(91);
@@ -101,6 +101,17 @@ test('host helper help/status/adopt do not restart services and reject foreign p
     const invalid = fixture();
     assert.notEqual(invalid.run(['adopt'], { MOCK_SETTINGS: 'AI_ENABLED=true\nBOT_ENHANCED_UI=true\nAI_DAILY_LIMIT=101\nPANEL_ALLOWED_REPORTS=all' }).status, 0);
     assert.ok(!existsSync(join(invalid.app, '.ops/settings.env')));
+});
+
+test('extension edits validate atomically and malformed restore identifiers cannot touch Docker', { skip: !hostTest }, async () => {
+    const state = fixture();
+    const valid = 'BOT_AUTO_MENU=true\nVOICE_ENABLED=false\nADMIN_USER_READ_ENABLED=false\nADMIN_WRITE_ENABLED=false\n';
+    assert.equal((await terminal(state, ['extensions'], { edit: valid })).code, 0);
+    assert.equal(readFileSync(join(state.app, '.env.extensions'), 'utf8'), valid);
+    assert.notEqual((await terminal(state, ['extensions'], { edit: valid.replace('VOICE_ENABLED=false', 'VOICE_ENABLED=yes') })).code, 0);
+    assert.equal(readFileSync(join(state.app, '.env.extensions'), 'utf8'), valid);
+    assert.ok(!state.commands().some(args => args.includes('up') || args.includes('stop')));
+    const fresh = fixture(); assert.notEqual(fresh.run(['restore', '../escape']).status, 0); assert.equal(fresh.commands().length, 0);
 });
 
 test('host apply validates offline, keeps controls consistent and touches no volumes or unrelated services', { skip: !hostTest }, () => {

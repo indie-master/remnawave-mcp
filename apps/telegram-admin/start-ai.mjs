@@ -32,8 +32,9 @@ try {
     } else {
         verifyClassifierCli();
         const controls = readRuntimeControls(process.env);
+        if (process.env.SUPPORT_AI_ENABLED !== undefined && !['true', 'false'].includes(process.env.SUPPORT_AI_ENABLED)) throw new Error('INVALID_AI_CONFIGURATION');
         store = createIntentStore({ filename: '/state/ai-quota.sqlite', dailyLimit: controls.dailyLimit });
-        server = createClassifierServer({ store, paused, pause: diagnostic => { failurePaused = true; writeFileSync(pauseFile, JSON.stringify({ observedAt: new Date().toISOString(), ...diagnostic }) + '\n', { mode: 0o600 }); }, classify: (text, signal) => createCodexClassifier({ signal, onUsage: usage => event({ event: 'usage', ...usage }) })(text), onEvent: event });
+        server = createClassifierServer({ store, paused, pause: diagnostic => { failurePaused = true; writeFileSync(pauseFile, JSON.stringify({ observedAt: new Date().toISOString(), ...diagnostic }) + '\n', { mode: 0o600 }); }, classify: (text, signal) => createCodexClassifier({ signal, onUsage: usage => event({ event: 'usage', ...usage }) })(text), support: process.env.SUPPORT_AI_ENABLED === 'true' ? (input, signal) => createCodexClassifier({ support: true, signal, onUsage: usage => event({ event: 'usage', ...usage }) })(input) : undefined, onEvent: event });
         mkdirSync('/bridge', { recursive: true, mode: 0o700 });
         if (existsSync(classifierSocket)) {
             if (!statSync(classifierSocket).isSocket()) throw new Error('AI_SOCKET_UNAVAILABLE');

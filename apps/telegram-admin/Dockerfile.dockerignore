@@ -31,3 +31,12 @@
 !apps/telegram-admin/extra-reports.mjs
 !apps/telegram-admin/extra-views.mjs
 !apps/telegram-admin/menu-session.mjs
+!apps/telegram-admin/extensions.mjs
+!apps/telegram-admin/voice-client.mjs
+!apps/telegram-admin/admin-users.mjs
+!apps/telegram-admin/business-client.mjs
+!apps/telegram-admin/state-transfer.mjs
+!apps/telegram-admin/admin-mcp.mjs
+!apps/telegram-admin/start-admin-mcp.mjs
+!apps/business/
+!apps/business/config.mjs
