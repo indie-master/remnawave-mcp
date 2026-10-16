@@ -26,7 +26,7 @@ const callback = (data, message_id = 11, update_id = 2) => ({ update_id, callbac
 test('natural local aliases separate user metrics from node metrics without AI', async () => {
     const groups = {
         stats: ['пришли статистику', 'Покажи статистику?', 'проверь статистику панели'],
-        users: ['покажи количество пользователей', 'сколько юзеров', 'статистика пользователей', 'число клиентов'],
+        users: ['покажи количество пользователей', 'сколько юзеров', 'статистика пользователей', 'число клиентов', 'сводка о клиентах'],
         online: ['сколько юзеров онлайн', 'сколько пользователей сейчас онлайн', 'покажи онлайн сейчас'],
         nodes: ['статистика нод', 'статистика серверов', 'сколько нод', 'состояние серверов'],
         node_details: ['список нод', 'онлайн на нодах', 'сколько пользователей на нодах'],
@@ -50,7 +50,7 @@ test('ambiguous filters, mixed subjects, unsupported dates and negations never f
     let calls = 0;
     const classify = createBudgetedIntent({ store, classify: async () => { calls++; } });
     try {
-        for (const phrase of ['статистика и ноды', 'подписки до 15 октября', 'подписки за 2 дня', 'подписки за 21 день', 'не показывай статистику', 'сколько пользователей на ноде 123', 'статистика пользователей за неделю', 'трафик по нодам']) {
+        for (const phrase of ['статистика и ноды', 'подписки до 15 октября', 'подписки за 2 дня', 'подписки за 21 день', 'не показывай статистику', 'сколько пользователей на ноде 123', 'статистика пользователей за неделю', 'трафик по нодам', 'число клиентов с истекшей подпиской', 'количество клиентов активных']) {
             store.put(phrase, { action: 'stats', days: 3 });
             assert.equal(resolveLocalRequest(phrase)?.kind, 'clarify', phrase);
             await assert.rejects(classify(phrase), /LOCAL_CLARIFICATION_REQUIRED/);

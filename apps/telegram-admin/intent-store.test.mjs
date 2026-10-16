@@ -24,13 +24,13 @@ test('learned intents and daily reservations survive database close and reopen',
     let calls = 0;
     let store = createIntentStore({ filename, now: () => start });
     const classify = createBudgetedIntent({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
-    await classify('Сводка о клиентах?');
+    await classify('Сводка по интеграции?');
     assert.equal(store.status().used, 1);
     store.close();
     store = createIntentStore({ filename, now: () => start + 1 });
     try {
         const afterRestart = createBudgetedIntent({ store, classify: async () => { calls++; } });
-        assert.deepEqual(await afterRestart('  СВОДКА  О КЛИЕНТАХ! '), { action: 'stats', days: 3 });
+        assert.deepEqual(await afterRestart('  СВОДКА  ПО ИНТЕГРАЦИИ! '), { action: 'stats', days: 3 });
         assert.equal(calls, 1);
         assert.equal(store.status().used, 1);
     } finally { store.close(); }
