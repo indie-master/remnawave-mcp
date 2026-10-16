@@ -49,7 +49,7 @@ async function main() {
     } catch { event({ event: 'intent', ok: false, code: 'AI_STATE_UNAVAILABLE' }); }
     const result = await runServerBot({
         ...options, api, service, allowedUserId: config.allowedUserId, botUsername: config.botUsername, signal: controller.signal,
-        classify, budgetStatus: intentStore?.status, aiEnabled: config.aiEnabled && !!classify,
+        classify, budgetStatus: intentStore?.status, enhancedUi: config.enhancedUi, aiEnabled: config.aiEnabled && !!classify,
         textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${maxDailyAiAttempts} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
         mcpRead: classify ? async (action, days) => {
             if (controller.signal.aborted) throw new Error('STOP_REQUESTED');

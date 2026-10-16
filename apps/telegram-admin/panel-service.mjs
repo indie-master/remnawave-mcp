@@ -1,3 +1,5 @@
+import { createExtraReports } from './extra-reports.mjs';
+
 function count(value) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error('INVALID_PANEL_RESPONSE');
     return value;
@@ -17,6 +19,7 @@ export function createPanelService({ clientFactory, usersEnabled = false, now = 
         finally { busy = false; }
     }
     return {
+        ...createExtraReports({ read, now }),
         ownerName: id => names.get(id),
         version: () => read(async client => {
             const data = await client.request('GET', '/api/system/metadata');

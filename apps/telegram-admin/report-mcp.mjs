@@ -10,6 +10,9 @@ const { ListToolsRequestSchema, CallToolRequestSchema } = await import(pathToFil
 
 export const reportTools = {
     version: 'get_metadata', stats: 'get_stats', nodes: 'get_nodes', expiring: 'expiring_subscriptions',
+    users: 'get_user_counts', online: 'get_online_counts', node_details: 'get_node_details',
+    hosts: 'get_host_counts', profiles: 'get_profile_counts', internal_squads: 'get_internal_squad_counts', external_squads: 'get_external_squad_counts',
+    system: 'get_system_resources', bandwidth: 'get_bandwidth_totals', health: 'get_runtime_health',
 };
 
 export function createReportMcp(service) {

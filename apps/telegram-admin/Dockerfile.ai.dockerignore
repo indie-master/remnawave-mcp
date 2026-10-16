@@ -2,6 +2,7 @@
 !apps/
 !apps/telegram-admin/
 !apps/telegram-admin/intent.mjs
+!apps/telegram-admin/extra-reports.mjs
 !apps/telegram-admin/intent-store.mjs
 !apps/telegram-admin/panel-service.mjs
 !apps/telegram-admin/ai-client.mjs

@@ -1,4 +1,6 @@
 import { createDashboard } from './dashboard.mjs';
+import { reportActions } from './intent.mjs';
+import { createMenuSession } from './menu-session.mjs';
 
 const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     if (signal?.aborted) { resolve(); return; }
@@ -7,7 +9,7 @@ const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     signal?.addEventListener('abort', finish, { once: true });
 });
 
-export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
+export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
     if (soleReceiverConfirmed !== true || typeof continuous !== 'boolean' || !Number.isInteger(seconds) || seconds < 60 || seconds > 900) throw new Error('LIVE_START_NOT_AUTHORIZED');
     const result = { status: 'stopped', reason: null, replies: 0, polls: 0, startedAt: null, stoppedAt: null };
     let ready = false;
@@ -25,7 +27,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
         result.startedAt = new Date(started).toISOString();
         deadline = continuous ? Infinity : started + seconds * 1000;
         const guardedService = { ownerName: service.ownerName };
-        for (const action of ['stats', 'nodes', 'version', 'expiring']) guardedService[action] = async (...args) => {
+        for (const action of reportActions) guardedService[action] = async (...args) => {
             if (signal?.aborted || now() >= deadline) throw new Error('STOP_REQUESTED');
             return service[action](...args);
         };
@@ -33,14 +35,15 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
             if (signal?.aborted || now() >= deadline) throw new Error('STOP_REQUESTED');
             return mcpRead(action, days);
         } : undefined;
-        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
+        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
+        const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
         await api.sendReply(notification(continuous
             ? 'Бот запущен на сервере. Кнопки работают без ИИ. Отправка клиентам отключена.'
             : `Тест бота начался на ${seconds / 60} мин. Остановка: ${new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', timeStyle: 'medium' }).format(new Date(deadline))} МСК. Кнопки работают без ИИ, отправка клиентам отключена.`));
         result.replies++;
         ready = true;
         heartbeat();
-        onReady({ ready: true, continuous, maxSeconds: continuous ? null : seconds, subscriptionAi: aiEnabled, cachedText: !!classify, customerSending: false, startedAt: result.startedAt });
+        onReady({ ready: true, continuous, maxSeconds: continuous ? null : seconds, subscriptionAi: aiEnabled, cachedText: !!classify, enhancedUi, customerSending: false, startedAt: result.startedAt });
         let consecutiveErrors = 0;
         while (!signal?.aborted && now() < deadline) {
             let updates;
@@ -62,14 +65,16 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
                 if (offset !== undefined && update.update_id < offset) continue;
                 offset = update.update_id + 1;
                 await saveOffset(offset);
-                const reply = await handle(update);
-                if (reply && !signal?.aborted && now() < deadline) {
-                    try { await api.sendReply(reply); result.replies++; }
-                    catch (error) {
+                try {
+                    if (menuSession) result.replies += await menuSession.process(update);
+                    else {
+                        const reply = await handle(update);
+                        if (reply && !signal?.aborted && now() < deadline) { await api.sendReply(reply); result.replies++; }
+                    }
+                } catch (error) {
                         if (signal?.aborted) break;
                         if (error?.code !== 'NETWORK_FAILED') throw error;
                         onEvent({ event: 'delivery', ok: false, code: 'DELIVERY_UNCERTAIN' });
-                    }
                 }
                 heartbeat();
             }

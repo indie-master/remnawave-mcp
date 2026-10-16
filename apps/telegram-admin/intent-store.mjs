@@ -32,7 +32,7 @@ export function createIntentStore({ filename, dailyLimit = maxDailyAiAttempts, m
         database?.close();
         throw new Error('AI_STATE_UNAVAILABLE');
     }
-    const keyFor = text => createHash('sha256').update('intent-v1\0' + normalizeQuestion(text)).digest('hex');
+    const keyFor = (text, version = 'intent-v1') => createHash('sha256').update(version + '\0' + normalizeQuestion(text)).digest('hex');
     const safe = operation => {
         try { return operation(); }
         catch (error) {
@@ -42,7 +42,7 @@ export function createIntentStore({ filename, dailyLimit = maxDailyAiAttempts, m
     };
     return {
         get: text => safe(() => {
-            const row = database.prepare('SELECT action, days, expires FROM intent_cache WHERE key=?').get(keyFor(text));
+            const row = database.prepare('SELECT action, days, expires FROM intent_cache WHERE key=? AND expires>?').get(keyFor(text, 'intent-v2'), now()) ?? database.prepare('SELECT action, days, expires FROM intent_cache WHERE key=?').get(keyFor(text));
             if (!row || row.expires <= now()) return null;
             return validateIntent({ action: row.action, days: row.days });
         }),
@@ -53,7 +53,8 @@ export function createIntentStore({ filename, dailyLimit = maxDailyAiAttempts, m
             database.exec('BEGIN IMMEDIATE');
             try {
                 database.prepare('DELETE FROM intent_cache WHERE expires<=?').run(timestamp);
-                database.prepare('INSERT OR REPLACE INTO intent_cache (key,action,days,expires,updated) VALUES (?,?,?,?,?)').run(keyFor(text), intent.action, intent.days, timestamp + ttlMs, timestamp);
+                const version = ['help', 'stats', 'nodes', 'version', 'expiring'].includes(intent.action) ? 'intent-v1' : 'intent-v2';
+                database.prepare('INSERT OR REPLACE INTO intent_cache (key,action,days,expires,updated) VALUES (?,?,?,?,?)').run(keyFor(text, version), intent.action, intent.days, timestamp + ttlMs, timestamp);
                 database.prepare('DELETE FROM intent_cache WHERE key IN (SELECT key FROM intent_cache ORDER BY updated DESC, key DESC LIMIT -1 OFFSET ?)').run(maxEntries);
                 database.exec('COMMIT');
             } catch (error) { database.exec('ROLLBACK'); throw error; }

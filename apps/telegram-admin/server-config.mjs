@@ -9,11 +9,12 @@ export function readServerConfig(env) {
     const aiEnabled = env.AI_ENABLED === 'true';
     if (aiEnabled && (env.AI_SOCKET_PATH !== classifierSocket || env.AI_CONFIRM_SUBSCRIPTION_USAGE !== 'true')) throw new Error('SERVER_AI_NOT_CONFIGURED');
     if (env.PANEL_USERS_READ_ENABLED !== undefined && !['true', 'false'].includes(env.PANEL_USERS_READ_ENABLED)) throw new Error('INVALID_SERVER_CONFIGURATION');
+    if (env.BOT_ENHANCED_UI !== undefined && !['true', 'false'].includes(env.BOT_ENHANCED_UI)) throw new Error('INVALID_SERVER_CONFIGURATION');
     const telegramTokenFile = env.TELEGRAM_BOT_TOKEN_FILE ?? '/run/secrets/telegram_bot_token';
     const panelTokenFile = env.REMNAWAVE_API_TOKEN_FILE ?? '/run/secrets/panel_api_token';
     const stateDirectory = env.BOT_STATE_DIRECTORY ?? '/state';
     if (![telegramTokenFile, panelTokenFile, stateDirectory].every(value => typeof value === 'string' && isAbsolute(value))) throw new Error('INVALID_SERVER_CONFIGURATION');
-    return { allowedUserId, botUsername: env.BOT_USERNAME, baseUrl: env.REMNAWAVE_BASE_URL, telegramTokenFile, panelTokenFile, stateDirectory, usersEnabled: env.PANEL_USERS_READ_ENABLED === 'true', aiEnabled };
+    return { allowedUserId, botUsername: env.BOT_USERNAME, baseUrl: env.REMNAWAVE_BASE_URL, telegramTokenFile, panelTokenFile, stateDirectory, usersEnabled: env.PANEL_USERS_READ_ENABLED === 'true', enhancedUi: env.BOT_ENHANCED_UI === 'true', aiEnabled };
 }
 
 export function readRunOptions(args) {

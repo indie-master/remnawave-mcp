@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { expiryWindows } from './panel-service.mjs';
-import { validateIntent } from './intent.mjs';
+import { reportActions, validateIntent } from './intent.mjs';
+import { resolveLocalRequest } from './local-router.mjs';
+import { extraView } from './extra-views.mjs';
 
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const button = (text, callback_data) => ({ text, callback_data });
@@ -11,15 +13,41 @@ const menu = keyboard([
     [button('⏳ Подписки', 'periods'), button('ℹ️ Версия', 'q:version')],
     [button('🧠 Лимит ИИ', 'budget')],
 ]);
+const extendedMenu = keyboard([
+    [button('📊 Статистика', 'q:stats'), button('🖥 Ноды', 'q:nodes')],
+    [button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')],
+    [button('⏳ Подписки', 'periods'), button('📋 Список нод', 'q:node_details')],
+    [button('⚙️ Ресурсы', 'q:system'), button('📈 Трафик', 'q:bandwidth')],
+    [button('🗂 Конфигурация', 'configuration'), button('🩺 Процессы', 'q:health')],
+    [button('ℹ️ Версия', 'q:version'), button('🧠 Лимит ИИ', 'budget')],
+]);
 
-export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
+export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
     if (!Number.isSafeInteger(allowedUserId) || allowedUserId <= 0) throw new Error('INVALID_ADMIN_ID');
     const reports = new Map();
     const drafts = new Map();
     let lastUpdateId = -1;
     let lastRead = -Infinity;
     let busy = false;
-    const reply = (text, reply_markup = menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
+    let context;
+    const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
+    function clarification(topic) {
+        const rows = topic === 'period'
+            ? [[1, 3, 7].map(days => button(`${days} дн.`, `q:expiring:${days}`)), [14, 30].map(days => button(`${days} дн.`, `q:expiring:${days}`))]
+            : topic === 'squads'
+                ? [[button('Внутренние', 'q:internal_squads'), button('Внешние', 'q:external_squads')]]
+                : [[button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')], [button('📊 Общая статистика', 'q:stats'), button('🖥 Ноды', 'q:nodes')], [button('⏳ Подписки', 'periods')]];
+        return reply(topic === 'period' ? 'Выберите поддерживаемый период: только активные подписки, истекающие от текущего момента. Даты и другие фильтры автоматически не подменяются.' : 'Уточните раздел. Запрос к ИИ не выполнялся; дополнительные фильтры не применены.', keyboard([...rows, [button('🏠 Меню', 'home')]]));
+    }
+    function nodePage(key, page = 0) {
+        const report = snapshot(key);
+        const lines = extraView('node_details', report, page);
+        const navigation = [];
+        if (page > 0) navigation.push(button('←', `nodepage:${key}:${page - 1}`));
+        if ((page + 1) * 5 < report.nodes.length) navigation.push(button('→', `nodepage:${key}:${page + 1}`));
+        lines.push(`\nПроверено: ${time(report.observedAt)} МСК`);
+        return reply(lines.join('\n'), keyboard([...(navigation.length ? [navigation] : []), [button('🔄 Обновить', 'q:node_details'), button('🏠 Меню', 'home')]]));
+    }
 
     function snapshot(key) {
         const stored = reports.get(key);
@@ -56,11 +84,12 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     }
     function render(action, report) {
         if (action === 'expiring') return expiryPage(store(report));
-        const lines = action === 'stats'
+        if (action === 'node_details') return nodePage(store(report));
+        const lines = extraView(action, report) ?? (action === 'stats'
             ? ['<b>📊 Статистика</b>', `Всего пользователей: <b>${report.totalUsers}</b>`, `Онлайн: <b>${report.usersOnline}</b>`]
             : action === 'nodes'
                 ? ['<b>🖥 Состояние нод</b>', `Всего: ${report.nodesTotal}`, `🟢 Онлайн: ${report.nodesOnline}`, `🔴 Офлайн: ${report.nodesOffline}`, `⚪ Отключены: ${report.nodesDisabled}`, `🟡 Подключаются: ${report.nodesConnecting}`]
-                : ['<b>ℹ️ Версия панели</b>', escapeHtml(report.panelVersion)];
+                : ['<b>ℹ️ Версия панели</b>', escapeHtml(report.panelVersion)]);
         lines.push(`\nПроверено: ${time(report.observedAt)} МСК`);
         return reply(lines.join('\n'), keyboard([[button('🔄 Проверить заново', `q:${action}`), button('🏠 Меню', 'home')]]));
     }
@@ -75,7 +104,11 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         lastUpdateId = update.update_id;
         if (callback) {
             if (typeof callback.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(callback.id) || typeof callback.data !== 'string' || callback.data.length > 64) return null;
-            await answerCallback(callback.id);
+            try { await answerCallback(callback.id); }
+            catch (error) {
+                if (!['NETWORK_FAILED', 'CALLBACK_EXPIRED'].includes(error?.code)) throw error;
+                onDiagnostic({ event: 'callback', ok: false, code: 'ACK_UNAVAILABLE' });
+            }
         } else {
             const age = now() / 1000 - message.date;
             if (!Number.isSafeInteger(message.date) || age > 120 || age < -15 || message.forward_origin || message.forward_from || message.forward_from_chat || typeof message.text !== 'string' || message.text.length > 2000)
@@ -94,6 +127,14 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 ...[[1, 3, 7], [14, 30]].map(days => days.map(day => button(`${day} дн.`, `q:expiring:${day}`))),
                 [button('🏠 Меню', 'home')],
             ]));
+            if (data === 'configuration') return reply('<b>🗂 Конфигурация: проверки чтения</b>\nПоказываются только счётчики. Ключи и содержимое конфигураций скрыты.', keyboard([
+                [button('🌐 Хосты', 'q:hosts'), button('🗂 Профили', 'q:profiles')],
+                [button('🔹 Внутренние сквады', 'q:internal_squads')],
+                [button('🔸 Внешние сквады', 'q:external_squads')],
+                [button('🏠 Меню', 'home')],
+            ]));
+            const nodeNavigation = data?.match(/^nodepage:([A-Za-z0-9_-]{8,24}):(\d+)$/);
+            if (nodeNavigation) return nodePage(nodeNavigation[1], Number(nodeNavigation[2]));
             const saved = data?.match(/^(page|draft):([A-Za-z0-9_-]{8,24}):(\d+)$/);
             if (saved) {
                 if (saved[1] === 'page') return expiryPage(saved[2], Number(saved[3]));
@@ -114,14 +155,26 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             }
             let intent;
             let source;
-            const query = data?.match(/^q:(stats|nodes|version|expiring)(?::(\d+))?$/);
-            const command = text.match(/^\/(stats|nodes|version)$/);
+            const query = data?.match(/^q:([a-z_]+)(?::(\d+))?$/);
+            const command = text.match(/^\/([a-z_]+)$/);
             if (query) {
+                if (!reportActions.includes(query[1])) throw new Error('INVALID_ACTION');
                 intent = { action: query[1], days: query[2] === undefined ? 3 : Number(query[2]) };
                 if (!expiryWindows.includes(intent.days) || (intent.action !== 'expiring' && query[2] !== undefined)) throw new Error('INVALID_ACTION');
                 source = 'direct';
-            } else if (command) { intent = { action: command[1], days: 3 }; source = 'direct'; }
+            } else if (command && reportActions.includes(command[1]) && command[1] !== 'expiring') { intent = { action: command[1], days: 3 }; source = 'direct'; }
             else if (callback || text.startsWith('/')) return reply('Неизвестная команда. Используйте кнопки или /menu.');
+            if (!intent && enhancedUi) {
+                const validContext = context && now() >= context.savedAt && now() - context.savedAt < 600000 ? context.intent : undefined;
+                const local = resolveLocalRequest(text, { context: validContext });
+                if (local?.kind === 'clarify') return clarification(local.topic);
+                if (local?.kind === 'blocked') return reply('Изменения панели и отправка клиентам недоступны. Используйте проверки чтения. ИИ не вызывался.');
+                if (local?.kind === 'intent') {
+                    intent = local.intent;
+                    source = mcpRead ? 'mcp' : 'direct';
+                    onDiagnostic({ event: 'intent', source: 'local', ok: true });
+                }
+            }
             if (busy || now() - lastRead < 5000) return reply('Дождитесь завершения запроса и повторите через пять секунд.');
             busy = true;
             lastRead = now();
@@ -132,12 +185,13 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                     intent = validateIntent(await classify(text));
                     source = 'mcp';
                 }
-                if (intent.action === 'help') return reply('Могу проверить статистику, ноды, версию и истекающие подписки. Изменения и отправка клиентам недоступны.');
+                if (intent.action === 'help') return reply('Могу проверить статистику, пользователей онлайн, ноды, версию, подписки, ресурсы, трафик и счётчики конфигурации. Изменения и отправка клиентам недоступны.');
                 stage = 'panel';
                 const report = source === 'direct'
                     ? await service[intent.action](intent.action === 'expiring' ? { days: intent.days } : undefined)
                     : await mcpRead(intent.action, intent.days);
                 const rendered = render(intent.action, report);
+                context = { intent, savedAt: now() };
                 onDiagnostic({ event: 'report', action: intent.action, source, ok: true });
                 return rendered;
             } catch (error) {
@@ -146,6 +200,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 throw error;
             } finally { busy = false; }
         } catch (error) {
+            if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification('scope');
             if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
             if (error?.message === 'AI_BRIDGE_UNAVAILABLE') return reply('ИИ-модуль сейчас недоступен. Проверка готовности не расходует попытку. Используйте кнопки или знакомые вопросы.');
             if (error?.message === 'AI_UNAVAILABLE') return reply('ИИ временно недоступен или не смог безопасно распознать вопрос. Попытка учтена, автоматического повтора нет. Используйте кнопки или знакомые вопросы.');

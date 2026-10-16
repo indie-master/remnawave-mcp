@@ -42,6 +42,7 @@ jobs:
         run: |
           docker compose -f apps/telegram-admin/compose.yaml config --quiet
           docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml config --quiet
+          docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml -f apps/telegram-admin/compose.features.yaml config --quiet
       - uses: docker/setup-buildx-action@v4
       - name: Build without publishing an image
         uses: docker/build-push-action@v7
@@ -68,6 +69,14 @@ jobs:
           import { createIntentStore } from '/app/apps/telegram-admin/intent-store.mjs';
           import { createBudgetedIntent } from '/app/apps/telegram-admin/budgeted-intent.mjs';
           import { connectReportMcp } from '/app/apps/telegram-admin/report-mcp.mjs';
+          import { resolveLocalRequest } from '/app/apps/telegram-admin/local-router.mjs';
+          import { createDashboard } from '/app/apps/telegram-admin/dashboard.mjs';
+          import { createMenuSession } from '/app/apps/telegram-admin/menu-session.mjs';
+          assert.equal(resolveLocalRequest('пришли статистику').intent.action, 'stats');
+          assert.equal(resolveLocalRequest('статистика нод').intent.action, 'nodes');
+          assert.equal(resolveLocalRequest('сколько юзеров онлайн').intent.action, 'online');
+          assert.equal(typeof createDashboard, 'function');
+          assert.equal(typeof createMenuSession, 'function');
           const store = createIntentStore({ filename: '/state/test.sqlite' });
           assert.equal(store.status().limit, 100);
           let calls = 0;

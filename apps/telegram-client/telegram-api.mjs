@@ -22,7 +22,7 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
             throw new TelegramError(signal?.aborted ? 'STOP_REQUESTED' : 'NETWORK_FAILED');
         }
         const maxBytes = 256 * 1024;
-        if (!response.ok || Number(response.headers.get('content-length')) > maxBytes) {
+        if (response.status === 409 || Number(response.headers.get('content-length')) > maxBytes) {
             await response.body?.cancel().catch(() => undefined);
             throw new TelegramError(response.status === 409 ? 'RECEIVER_CONFLICT' : 'TELEGRAM_REQUEST_FAILED');
         }
@@ -42,7 +42,14 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
                 chunks.push(part.value);
             }
             const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-            if (payload?.ok !== true) throw new TelegramError('TELEGRAM_REQUEST_FAILED');
+            if (!response.ok || payload?.ok !== true) {
+                if (response.status === 400 && method === 'editMessageText') {
+                    if (payload?.description === 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message') throw new TelegramError('EDIT_NOT_MODIFIED');
+                    if (["Bad Request: message can't be edited", 'Bad Request: message to edit not found'].includes(payload?.description)) throw new TelegramError('EDIT_UNAVAILABLE');
+                }
+                if (response.status === 400 && method === 'answerCallbackQuery' && payload?.description === 'Bad Request: query is too old and response timeout expired or query ID is invalid') throw new TelegramError('CALLBACK_EXPIRED');
+                throw new TelegramError('TELEGRAM_REQUEST_FAILED');
+            }
             return payload.result;
         } catch (error) {
             if (error instanceof TelegramError) throw error;
@@ -73,11 +80,17 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
             const fields = enableButtons ? ['chat_id', 'text', 'protect_content', 'parse_mode', 'reply_markup'] : ['chat_id', 'text', 'protect_content'];
             if (!payload || payload.chat_id !== allowedUserId || payload.protect_content !== true || typeof payload.text !== 'string' || payload.text.length < 1 || payload.text.length > 4096 || Object.keys(payload).some(key => !fields.includes(key)) || (payload.parse_mode !== undefined && payload.parse_mode !== 'HTML') || (payload.reply_markup !== undefined && !safeKeyboard(payload.reply_markup)))
                 throw new TelegramError('REPLY_BLOCKED');
-            await call('sendMessage', { ...payload, chat_id: allowedUserId, protect_content: true });
+            return call('sendMessage', { ...payload, chat_id: allowedUserId, protect_content: true });
         },
-        ...(enableButtons ? { answerCallback: async id => {
-            if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new TelegramError('CALLBACK_BLOCKED');
-            await call('answerCallbackQuery', { callback_query_id: id });
+        ...(enableButtons ? { editReply: async payload => {
+            const fields = ['chat_id', 'message_id', 'text', 'protect_content', 'parse_mode', 'reply_markup'];
+            if (!payload || payload.chat_id !== allowedUserId || payload.protect_content !== true || !Number.isSafeInteger(payload.message_id) || payload.message_id <= 0 || typeof payload.text !== 'string' || payload.text.length < 1 || payload.text.length > 4096 || Object.keys(payload).some(key => !fields.includes(key)) || (payload.parse_mode !== undefined && payload.parse_mode !== 'HTML') || (payload.reply_markup !== undefined && !safeKeyboard(payload.reply_markup))) throw new TelegramError('REPLY_BLOCKED');
+            const { protect_content, ...body } = payload;
+            try { return await call('editMessageText', body); }
+            catch (error) { if (error?.code !== 'EDIT_NOT_MODIFIED') throw error; }
+        }, answerCallback: async (id, text) => {
+            if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id) || (text !== undefined && (typeof text !== 'string' || text.length > 200))) throw new TelegramError('CALLBACK_BLOCKED');
+            await call('answerCallbackQuery', { callback_query_id: id, ...(text === undefined ? {} : { text }) });
         } } : {}),
     };
 }
