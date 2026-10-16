@@ -34,6 +34,9 @@ jobs:
       - run: npm run build
       - run: npm run test:bot
       - run: bash -n apps/telegram-admin/configure.sh
+      - run: bash -n apps/telegram-admin/botctl && bash -n apps/telegram-admin/ops-host.sh
+      - name: Synthetic host CLI and hidden-input terminal tests, without Docker or network access
+        run: sudo env "PATH=$PATH" "$(command -v node)" --test apps/telegram-admin/ops-host.test.mjs
       - name: Validate Compose using synthetic configuration only
         env:
           REMNAWAVE_BASE_URL: https://panel.example.invalid
@@ -43,6 +46,7 @@ jobs:
           docker compose -f apps/telegram-admin/compose.yaml config --quiet
           docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml config --quiet
           docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml -f apps/telegram-admin/compose.features.yaml config --quiet
+          AI_DAILY_LIMIT=10 PANEL_ALLOWED_REPORTS=stats,nodes docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml -f apps/telegram-admin/compose.features.yaml -f apps/telegram-admin/compose.controls.yaml -f apps/telegram-admin/compose.controls.ai.yaml config --quiet
       - uses: docker/setup-buildx-action@v4
       - name: Build without publishing an image
         uses: docker/build-push-action@v7
@@ -72,6 +76,12 @@ jobs:
           import { resolveLocalRequest } from '/app/apps/telegram-admin/local-router.mjs';
           import { createDashboard } from '/app/apps/telegram-admin/dashboard.mjs';
           import { createMenuSession } from '/app/apps/telegram-admin/menu-session.mjs';
+          import { readRuntimeControls, applyReportPolicy } from '/app/apps/telegram-admin/runtime-controls.mjs';
+          import { validateBaseConfiguration, validateControlConfiguration } from '/app/apps/telegram-admin/ops-config.mjs';
+          assert.equal(readRuntimeControls({ AI_DAILY_LIMIT: '10' }).dailyLimit, 10);
+          assert.equal(validateBaseConfiguration('REMNAWAVE_BASE_URL=https://panel.example.invalid\nBOT_USERNAME=example_admin_bot\nTELEGRAM_ADMIN_ID=123456789\n'), true);
+          assert.equal(validateControlConfiguration('AI_ENABLED=true\nBOT_ENHANCED_UI=true\nAI_DAILY_LIMIT=10\nPANEL_ALLOWED_REPORTS=stats,nodes\n').dailyLimit, 10);
+          await assert.rejects(applyReportPolicy({ stats: async () => { throw new Error('MUST_NOT_CALL'); } }, []).stats(), /REPORT_DISABLED/);
           assert.equal(resolveLocalRequest('пришли статистику').intent.action, 'stats');
           assert.equal(resolveLocalRequest('статистика нод').intent.action, 'nodes');
           assert.equal(resolveLocalRequest('сколько юзеров онлайн').intent.action, 'online');

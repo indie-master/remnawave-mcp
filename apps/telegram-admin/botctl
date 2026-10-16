@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set +x
+set -euo pipefail
+directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if [[ -L "$directory/ops-host.sh" || ! -f "$directory/ops-host.sh" ]]; then
+    printf 'Host helper unavailable.\n' >&2
+    exit 2
+fi
+implementation=$(<"$directory/ops-host.sh")
+exec env -u BASH_ENV -u ENV bash -c "$implementation" -- "$directory" "$@"

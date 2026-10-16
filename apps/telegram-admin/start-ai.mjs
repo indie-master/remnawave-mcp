@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { createIntentStore, maxDailyAiAttempts } from './intent-store.mjs';
+import { createIntentStore } from './intent-store.mjs';
+import { readRuntimeControls } from './runtime-controls.mjs';
 import { createCodexClassifier } from './codex-classifier.mjs';
 import { verifyClassifierCli } from './verify-ai-cli.mjs';
 import { createClassifierServer } from './ai-worker.mjs';
@@ -30,7 +31,8 @@ try {
         await waitForOperator({ signal: controller.signal, heartbeat });
     } else {
         verifyClassifierCli();
-        store = createIntentStore({ filename: '/state/ai-quota.sqlite' });
+        const controls = readRuntimeControls(process.env);
+        store = createIntentStore({ filename: '/state/ai-quota.sqlite', dailyLimit: controls.dailyLimit });
         server = createClassifierServer({ store, paused, pause: diagnostic => { failurePaused = true; writeFileSync(pauseFile, JSON.stringify({ observedAt: new Date().toISOString(), ...diagnostic }) + '\n', { mode: 0o600 }); }, classify: (text, signal) => createCodexClassifier({ signal, onUsage: usage => event({ event: 'usage', ...usage }) })(text), onEvent: event });
         mkdirSync('/bridge', { recursive: true, mode: 0o700 });
         if (existsSync(classifierSocket)) {
@@ -41,7 +43,7 @@ try {
         ownsSocket = true;
         chmodSync(classifierSocket, 0o600);
         heartbeat(); heartbeatTimer = setInterval(heartbeat, 30000);
-        event({ ready: true, subscriptionAi: true, dailyLimit: maxDailyAiAttempts, customerSending: false, model: 'gpt-6-luna' });
+        event({ ready: true, subscriptionAi: true, dailyLimit: controls.dailyLimit, customerSending: false, model: 'gpt-6-luna' });
         await new Promise(resolve => {
             const end = () => { server.close(); server.closeAllConnections(); resolve(); };
             if (controller.signal.aborted) end();

@@ -33,7 +33,8 @@ export function createReportMcp(service) {
             if (action === 'expiring' && args.days !== undefined && !expiryWindows.includes(args.days)) throw new Error('REQUEST_BLOCKED');
             const data = action === 'expiring' ? mcpSafeExpiry(await service.expiring(args)) : await service[action]();
             return { content: [{ type: 'text', text: JSON.stringify(data) }] };
-        } catch {
+        } catch (error) {
+            if (error?.message === 'REPORT_DISABLED') return { isError: true, content: [{ type: 'text', text: 'REPORT_DISABLED: report disabled in local policy.' }] };
             return { isError: true, content: [{ type: 'text', text: 'REPORT_UNAVAILABLE: verify read scopes, token validity and data format; no changes were made.' }] };
         }
     });
@@ -49,7 +50,7 @@ export async function connectReportMcp(service) {
         async read(action, days = 3) {
             if (!Object.hasOwn(reportTools, action)) throw new Error('UNKNOWN_REPORT');
             const result = await client.callTool({ name: reportTools[action], arguments: action === 'expiring' ? { days } : {} });
-            if (result.isError) throw new Error('REPORT_UNAVAILABLE');
+            if (result.isError) throw new Error(result.content?.[0]?.text === 'REPORT_DISABLED: report disabled in local policy.' ? 'REPORT_DISABLED' : 'REPORT_UNAVAILABLE');
             return JSON.parse(result.content[0].text);
         },
         close: () => Promise.allSettled([client.close(), server.close()]),

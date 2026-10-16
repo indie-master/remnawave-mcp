@@ -10,3 +10,4 @@ receiver-safety.json
 classifier-paused
 auth.json
 .codex/
+.ops/

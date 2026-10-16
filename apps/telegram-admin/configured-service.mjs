@@ -1,8 +1,9 @@
 import { readFileSync, statSync } from 'node:fs';
 import { RemnawaveClient } from '../../dist/client.js';
 import { createPanelService } from './panel-service.mjs';
+import { applyReportPolicy } from './runtime-controls.mjs';
 
-export function createConfiguredService({ baseUrl, tokenFile, usersEnabled = false, signal }) {
+export function createConfiguredService({ baseUrl, tokenFile, usersEnabled = false, allowedReports, signal }) {
     let address;
     try { address = new URL(baseUrl); }
     catch { throw new Error('INVALID_LOCAL_CONFIGURATION'); }
@@ -24,5 +25,5 @@ export function createConfiguredService({ baseUrl, tokenFile, usersEnabled = fal
             };
         },
     });
-    return { ...service, bypassProxyHost: address.hostname };
+    return { ...applyReportPolicy(service, allowedReports), bypassProxyHost: address.hostname };
 }

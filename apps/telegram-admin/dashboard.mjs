@@ -200,6 +200,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 throw error;
             } finally { busy = false; }
         } catch (error) {
+            if (error?.message === 'REPORT_DISABLED') return reply('Этот отчёт отключён в локальных разрешениях бота. API панели не запрашивался; изменить список может администратор через SSH. Права самого токена панели не менялись.');
             if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification('scope');
             if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
             if (error?.message === 'AI_BRIDGE_UNAVAILABLE') return reply('ИИ-модуль сейчас недоступен. Проверка готовности не расходует попытку. Используйте кнопки или знакомые вопросы.');

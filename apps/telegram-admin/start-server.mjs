@@ -4,7 +4,7 @@ import { createConfiguredService } from './configured-service.mjs';
 import { createTelegramApi } from '../telegram-client/telegram-api.mjs';
 import { readRunOptions, readServerConfig } from './server-config.mjs';
 import { runServerBot } from './server-loop.mjs';
-import { createIntentStore, maxDailyAiAttempts } from './intent-store.mjs';
+import { createIntentStore } from './intent-store.mjs';
 import { createBudgetedIntent } from './budgeted-intent.mjs';
 import { createRunSafety, waitForOperator } from './run-safety.mjs';
 import { createClassifierClient } from './ai-client.mjs';
@@ -33,7 +33,7 @@ async function main() {
         return;
     }
     const config = readServerConfig(process.env);
-    const service = createConfiguredService({ baseUrl: config.baseUrl, tokenFile: config.panelTokenFile, usersEnabled: config.usersEnabled, signal: controller.signal });
+    const service = createConfiguredService({ baseUrl: config.baseUrl, tokenFile: config.panelTokenFile, usersEnabled: config.usersEnabled, allowedReports: config.allowedReports, signal: controller.signal });
     if (statSync(config.telegramTokenFile).size > 4096) throw new Error('INVALID_LOCAL_CREDENTIAL');
     const token = readFileSync(config.telegramTokenFile, 'utf8').trim();
     const apiOptions = { token, allowedUserId: config.allowedUserId, enableButtons: true };
@@ -43,14 +43,14 @@ async function main() {
     const heartbeatFile = join(config.stateDirectory, 'heartbeat.json');
     let classify;
     try {
-        intentStore = createIntentStore({ filename: join(config.stateDirectory, 'intent-cache.sqlite') });
+        intentStore = createIntentStore({ filename: join(config.stateDirectory, 'intent-cache.sqlite'), dailyLimit: config.dailyLimit });
         const external = config.aiEnabled ? createClassifierClient({ signal: controller.signal }) : undefined;
         classify = createBudgetedIntent({ store: intentStore, classify: external, onEvent: event });
     } catch { event({ event: 'intent', ok: false, code: 'AI_STATE_UNAVAILABLE' }); }
     const result = await runServerBot({
         ...options, api, service, allowedUserId: config.allowedUserId, botUsername: config.botUsername, signal: controller.signal,
         classify, budgetStatus: intentStore?.status, enhancedUi: config.enhancedUi, aiEnabled: config.aiEnabled && !!classify,
-        textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${maxDailyAiAttempts} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
+        textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${config.dailyLimit} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
         mcpRead: classify ? async (action, days) => {
             if (controller.signal.aborted) throw new Error('STOP_REQUESTED');
             reports ??= await (await import('./report-mcp.mjs')).connectReportMcp(service);

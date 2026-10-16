@@ -1,5 +1,6 @@
 import { isAbsolute } from 'node:path';
 import { classifierSocket } from './ai-client.mjs';
+import { readRuntimeControls } from './runtime-controls.mjs';
 
 export function readServerConfig(env) {
     const allowedUserId = Number(env.TELEGRAM_ADMIN_ID);
@@ -14,7 +15,7 @@ export function readServerConfig(env) {
     const panelTokenFile = env.REMNAWAVE_API_TOKEN_FILE ?? '/run/secrets/panel_api_token';
     const stateDirectory = env.BOT_STATE_DIRECTORY ?? '/state';
     if (![telegramTokenFile, panelTokenFile, stateDirectory].every(value => typeof value === 'string' && isAbsolute(value))) throw new Error('INVALID_SERVER_CONFIGURATION');
-    return { allowedUserId, botUsername: env.BOT_USERNAME, baseUrl: env.REMNAWAVE_BASE_URL, telegramTokenFile, panelTokenFile, stateDirectory, usersEnabled: env.PANEL_USERS_READ_ENABLED === 'true', enhancedUi: env.BOT_ENHANCED_UI === 'true', aiEnabled };
+    return { ...readRuntimeControls(env), allowedUserId, botUsername: env.BOT_USERNAME, baseUrl: env.REMNAWAVE_BASE_URL, telegramTokenFile, panelTokenFile, stateDirectory, usersEnabled: env.PANEL_USERS_READ_ENABLED === 'true', enhancedUi: env.BOT_ENHANCED_UI === 'true', aiEnabled };
 }
 
 export function readRunOptions(args) {

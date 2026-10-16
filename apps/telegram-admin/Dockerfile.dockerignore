@@ -25,6 +25,8 @@
 !apps/telegram-admin/start-server.mjs
 !apps/telegram-admin/healthcheck.mjs
 !apps/telegram-admin/ai-client.mjs
+!apps/telegram-admin/runtime-controls.mjs
+!apps/telegram-admin/ops-config.mjs
 !apps/telegram-admin/local-router.mjs
 !apps/telegram-admin/extra-reports.mjs
 !apps/telegram-admin/extra-views.mjs
