@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -19,7 +19,7 @@ function fixture() {
     const app = join(root, 'apps', 'telegram-admin');
     const bin = join(root, 'mock-bin');
     mkdirSync(app, { recursive: true }); mkdirSync(bin);
-    for (const filename of ['botctl', 'ops-host.sh']) { copyFileSync(join(directory, filename), join(app, filename)); chmodSync(join(app, filename), 0o755); }
+    for (const filename of ['botctl', 'ops-host.sh']) { copyFileSync(join(directory, filename), join(app, filename)); chownSync(join(app, filename), 0, 0); chmodSync(join(app, filename), 0o755); }
     writeFileSync(join(app, '.env'), base, { mode: 0o600 });
     const log = join(root, 'commands.jsonl');
     const docker = `#!/usr/bin/env node
@@ -118,7 +118,7 @@ test('host apply validates offline, keeps controls consistent and touches no vol
 });
 
 test('failed validation cannot fall through to apply and dirty source is never reset', { skip: !hostTest }, () => {
-    const fixtureState = fixture(); fixtureState.run(['adopt']);
+    const fixtureState = fixture(); assert.equal(fixtureState.run(['adopt']).status, 0);
     assert.notEqual(fixtureState.run(['apply'], { MOCK_VALIDATION_FAIL: 'true' }).status, 0);
     assert.notEqual(fixtureState.run(['apply'], { MOCK_DIRTY: 'true' }).status, 0);
     assert.ok(!fixtureState.commands().some(args => args.includes('up') || args.includes('checkout')));
