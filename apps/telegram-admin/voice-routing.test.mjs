@@ -11,6 +11,20 @@ const actor = 123456789;
 const start = Date.parse('2026-10-19T09:00:00Z');
 const question = 'синтетический голосовой вопрос';
 
+test('a single extra preposition after a read request preserves the exact report subject', () => {
+    for (const [phrase, action] of [
+        ['пришли в статистику.', 'stats'],
+        ['покажи в общую статистику', 'stats'],
+        ['пришли в статистику панели', 'stats'],
+        ['пришли в статистику нод', 'nodes'],
+        ['пришли в статистику по серверам', 'nodes'],
+        ['пришли в статистику пользователей', 'users'],
+        ['пришли в статистику клиентов', 'users'],
+    ]) assert.equal(resolveLocalRequest(phrase).intent.action, action, phrase);
+    for (const phrase of ['пришли в статистику нод за месяц', 'пришли в статистику нод и пользователей', 'не пришли в статистику', 'пришли в статистику без нод', 'пришли в статистику в Москве', 'пришли в в статистику', 'в статистику']) assert.equal(resolveLocalRequest(phrase).kind, 'clarify', phrase);
+    assert.equal(resolveLocalRequest('удали в статистику пользователя').kind, 'blocked');
+});
+
 test('spoken punctuation preserves exact local meanings and does not discard filters, negations or writes', () => {
     for (const phrase of ['Пришли, статистику.', 'Пришли, пожалуйста, статистику.']) assert.equal(resolveLocalRequest(phrase).intent.action, 'stats', phrase);
     assert.equal(resolveLocalRequest('Пришли, пожалуйста, статистику нод.').intent.action, 'nodes');
@@ -68,10 +82,10 @@ function fixture({ enhancedUi = true, dailyLimit = 100, fail = false } = {}) {
     return { handle, classify, store, events, message, callback, advance: milliseconds => { clock += milliseconds; }, counts: () => ({ modelCalls, readinessCalls, reads }), now: () => clock };
 }
 
-for (const enhancedUi of [true, false]) test(`local voice reaches known commands without AI, enhanced UI ${enhancedUi}`, async () => {
+for (const enhancedUi of [true, false]) for (const transcript of ['Пришли статистику.', 'пришли в статистику.']) test(`local voice reaches known commands without AI, enhanced UI ${enhancedUi}: ${transcript}`, async () => {
     const state = fixture({ enhancedUi });
     try {
-        const input = createVoiceInput({ allowedUserId: actor, now: state.now, api: { downloadVoice: async () => Buffer.from('OggS' + '0'.repeat(20)) }, transcribe: async () => 'Пришли статистику.' });
+        const input = createVoiceInput({ allowedUserId: actor, now: state.now, api: { downloadVoice: async () => Buffer.from('OggS' + '0'.repeat(20)) }, transcribe: async () => transcript });
         const update = state.message(undefined, false);
         update.message.voice = { duration: 2, file_size: 24, mime_type: 'audio/ogg', file_id: 'synthetic' };
         const transcribed = await input(update);

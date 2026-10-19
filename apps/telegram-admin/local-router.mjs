@@ -19,7 +19,7 @@ export function resolveLocalRequest(text, { context } = {}) {
     if (/(?:^|\s)(?:delete|update|create|notify|password|token|secret|ssh|docker|restart|reset|enable|disable)(?:\s|$)|(?:удал|отключ|заблок|разблок|отправь|отправить|рассыл|продли|продлить|обнови|перезапуст|сброс|измени|созда|парол|токен|секрет)/.test(normalized)) return { kind: 'blocked' };
     if (/(?:^|\s)(?:не|кроме|без|исключая|not|except)(?:\s|$)/.test(normalized)) return clarify('scope');
     let phrase = normalized.replace(/^(?:а |и )/, '').replace(/,? пожалуйста(?:,)?/g, ' ').replace(/\s+/g, ' ').trim();
-    phrase = phrase.replace(/^(?:(?:покажи|покажите|пришли|проверь|проверить|дай|выведи|подскажи|скажи|сколько|какое|какая|какие|хочу узнать|можешь показать|можно узнать)\s+)+/, '').trim();
+    phrase = phrase.replace(/^(?:(?:покажи|покажите|пришли|проверь|проверить|дай|выведи|подскажи|скажи|сколько|какое|какая|какие|хочу узнать|можешь показать|можно узнать)\s+)+(?:в\s+)?/, '').trim();
     phrase = phrase.replace(/^общую статистику(?= |$)/, 'общая статистика').replace(/^статистику(?= |$)/, 'статистика');
     if (/^(?:а |и )/.test(normalized) && /^(?:онлайн|сейчас|сейчас онлайн|кто онлайн)$/.test(phrase)) {
         if (['nodes', 'node_details'].includes(context?.action)) return plan('nodes');
