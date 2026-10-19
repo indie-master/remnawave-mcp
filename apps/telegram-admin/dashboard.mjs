@@ -133,7 +133,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             }
             if (adminHandle && !voiceApproved) {
                 const result = await adminHandle({ text, data, allowedUserId });
-                if (result) return reply(result.text, result.reply_markup);
+                if (result) { context = undefined; return reply(result.text, result.reply_markup); }
             }
             if (/^(?:плат[её]ж|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) return reply('Бизнес-модуль или это действие не включены. Запрос к ИИ не выполнялся.');
             if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return home();

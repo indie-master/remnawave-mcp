@@ -79,6 +79,7 @@ for (const mode of ['cancel', 'timeout', 'clock', 'home', 'business']) test(`int
         if (mode === 'clock') state.advance(-1);
         const result = await state.send('42');
         if (['timeout', 'clock'].includes(mode)) assert.match(result.text, /истекло/);
+        else if (mode === 'cancel') assert.match(result.text, /Найти пользователя/);
         else assert.equal(result, null);
         assert.deepEqual(state.counts(), { reads: 0, writes: 0 });
     } finally { state.administration.close(); }

@@ -149,6 +149,7 @@ export function createUserAdministration({ filename, client, actorId, readEnable
 export function createAdminHandler({ administration, actorId, renewalDays = [1, 7, 30, 90], now = Date.now }) {
     if (!Number.isSafeInteger(actorId) || actorId <= 0 || !Array.isArray(renewalDays) || !renewalDays.length || renewalDays.length > 8 || new Set(renewalDays).size !== renewalDays.length || renewalDays.some(days => !Number.isInteger(days) || days < 1 || days > 366)) throw new Error('ADMIN_CONFIGURATION_INVALID');
     let input;
+    let userSection = false;
     const escape = value => String(value ?? 'нет данных').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
     const response = (text, rows = [[{ text: '🏠 Меню', callback_data: 'home' }]]) => ({ text, reply_markup: { inline_keyboard: rows } });
     const proposal = ticket => response(`<b>Подтверждение администратора</b>\nПользователь: <code>${escape(ticket.target)}</code>\n${ticket.operation === 'subscription' ? 'Показать секретную ссылку подписки только в этом чате.' : `Изменения: <code>${escape(JSON.stringify(ticket.changes))}</code>`}\nДействует 3 минуты. ИИ не может подтвердить действие.`, [[{ text: '✅ Подтвердить', callback_data: `ac:${ticket.id}` }, { text: 'Отмена', callback_data: `ax:${ticket.id}` }]]);
@@ -168,19 +169,20 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
     return async ({ text = '', data, allowedUserId }) => {
         if (allowedUserId !== actorId) return null;
         const priorInput = input;
-        if (data || text.startsWith('/') || /^(?:плат[её]ж|ответ|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) input = undefined;
+        if (data || text.startsWith('/') || /^(?:плат[её]ж|ответ|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) { input = undefined; userSection = false; }
         const match = text.match(/^(?:(?:покажи|открой|найди)\s+)?(?:пользователь|пользователя|юзер|юзера|user)\s+(?:(?:с\s+)?id\s+|#)?([A-Za-z0-9_-]{1,36})$/i);
         const edit = text.match(/^(?:измени|изменить)\s+([A-Za-z0-9_-]{1,36})\s+([A-Za-z]+)=(.{1,500})$/i);
         const subscription = text.match(/^(?:подписка|ссылка подписки)\s+([A-Za-z0-9_-]{1,36})$/i);
         const pending = text.match(/^заявка\s+([A-Za-z0-9_-]{16})$/);
         const renewal = text.match(/^(?:продли|продлить)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})\s+на\s+(\d{1,3})\s+(?:день|дня|дней)$/i);
         const statusChange = text.match(/^(включи|отключи)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})$/i);
-        if (!input && /^подписка\s+[А-Яа-яЁё]/.test(text)) return null;
+        if (!input && /^подписка\s+[А-Яа-яЁё]/.test(text)) { userSection = false; return null; }
         const interactive = /^(?:admin_home|admin_search|admin_cancel_input|admin_operations|a[rv]:\d{1,16}|ap:\d{1,16}:\d{1,3}|af:\d{1,16}:[A-Za-z]+)$/.test(data ?? '');
-        if (!match && !edit && !subscription && !pending && !renewal && !statusChange && !input && !interactive && !/^(?:ac:|ax:|al:|au:|ad:|ae:)/.test(data ?? '') && !/^(?:пользователь|юзер|user|измени|изменить|подписка|ссылка подписки|заявка|продли|продлить|включи|отключи)(?:\s|$)/i.test(text)) return null;
+        const inactiveReference = !data && !input && userSection && reference(text.trim());
+        if (!match && !edit && !subscription && !pending && !renewal && !statusChange && !input && !interactive && !inactiveReference && !/^(?:ac:|ax:|al:|au:|ad:|ae:)/.test(data ?? '') && !/^(?:пользователь|юзер|user|измени|изменить|подписка|ссылка подписки|заявка|продли|продлить|включи|отключи)(?:\s|$)/i.test(text)) { userSection = false; return null; }
         try {
-            if (data === 'admin_home') return response('<b>Управление пользователями</b>\nПоиск по точному ID или username, карточка, подписка, продление и разрешённые поля. Чтение не использует ИИ; изменения требуют отдельной кнопки подтверждения.', navigation);
-            if (data === 'admin_search') { input = { kind: 'search', at: now() }; return response('Введите точный числовой ID или username без дополнительных слов. Ввод действует 2 минуты; похожие имена не подбираются.', [[{ text: 'Отмена', callback_data: 'admin_cancel_input' }]]); }
+            userSection = true;
+            if (data === 'admin_home' || data === 'admin_search') { input = { kind: 'search', at: now() }; return response('<b>Поиск пользователя</b>\nВведите точный числовой ID или username без дополнительных слов. Ввод действует 2 минуты; похожие имена не подбираются. ИИ не используется.', [[{ text: 'Отмена', callback_data: 'admin_cancel_input' }, { text: '🗒 Операции', callback_data: 'admin_operations' }], [{ text: '🏠 Меню', callback_data: 'home' }]]); }
             if (data === 'admin_cancel_input') return response('Ввод отменён. Панель не изменялась.', navigation);
             if (data === 'admin_operations') {
                 const entries = administration.operations?.(actorId) ?? [];
@@ -207,6 +209,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                 input = { kind: 'field', target: fieldInput[1], field: fieldInput[2], at: now() };
                 return response(`Введите новое значение: ${escape(labels[fieldInput[2]])}.\nДля статуса: ACTIVE или DISABLED; для даты — ISO8601 с часовым поясом; числовые лимиты — целым числом. Ввод действует 2 минуты.`, [[{ text: 'Отмена', callback_data: 'admin_cancel_input' }]]);
             }
+            if (inactiveReference && !match && !edit && !subscription && !pending && !renewal && !statusChange) return response('Для поиска нажмите «Найти пользователя» и отправьте ID или username после приглашения. Панель и ИИ не запрашивались; число не считается периодом подписки.', navigation);
             if (!data && input && !match && !edit && !subscription && !pending && !renewal && !statusChange) {
                 const value = input; input = undefined;
                 if (now() < value.at || now() - value.at >= 120000) return response('Время ввода истекло. Откройте действие заново.', navigation);
