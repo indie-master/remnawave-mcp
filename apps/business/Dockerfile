@@ -18,6 +18,6 @@ COPY apps/business/account-cli.mjs ./apps/business/
 COPY apps/business/reference-search.mjs ./apps/business/
 COPY apps/business/media-client.mjs ./apps/business/
 COPY apps/business/guides.mjs ./apps/business/
-RUN mkdir /state /business-bridge /media-bridge && chown node:node /state /business-bridge /media-bridge
+RUN chmod -R a+rX /app && mkdir /state /business-bridge /media-bridge && chown node:node /state /business-bridge /media-bridge
 USER node
 ENTRYPOINT ["node", "/app/apps/business/start.mjs"]

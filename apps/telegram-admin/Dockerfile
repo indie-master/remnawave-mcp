@@ -22,6 +22,6 @@ COPY apps/telegram-admin/state-transfer.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/admin-mcp.mjs apps/telegram-admin/start-admin-mcp.mjs ./apps/telegram-admin/
 COPY apps/business/config.mjs ./apps/business/
 COPY apps/telegram-admin/local-router.mjs apps/telegram-admin/extra-reports.mjs apps/telegram-admin/extra-views.mjs apps/telegram-admin/menu-session.mjs ./apps/telegram-admin/
-RUN mkdir /state /voice /business-bridge && chown node:node /state /voice /business-bridge
+RUN chmod -R a+rX /app && mkdir /state /voice /business-bridge && chown node:node /state /voice /business-bridge
 USER node
 ENTRYPOINT ["node", "/app/apps/telegram-admin/start-server.mjs"]

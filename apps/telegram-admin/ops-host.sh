@@ -189,11 +189,21 @@ clean_checkout() {
     git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet && [[ -z $(git -C "$REPO" ls-files --others --exclude-standard) ]] || fail 'Есть локальные изменения исходников. Они не сбрасывались.'
 }
 
+pin_record() {
+    docker_local image inspect "$BOT_IMAGE" >/dev/null || return
+    [[ "$AI_IMAGE" == none ]] || docker_local image inspect "$AI_IMAGE" >/dev/null || return
+    docker_local tag "$BOT_IMAGE" "panel-admin-bot:checkpoint-${BOT_IMAGE#sha256:}" || return
+    [[ "$AI_IMAGE" == none ]] || docker_local tag "$AI_IMAGE" "panel-admin-ai:checkpoint-${AI_IMAGE#sha256:}" || return
+}
+
 retag_record() {
-    docker_local image inspect "$BOT_IMAGE" >/dev/null
-    [[ "$AI_IMAGE" == none ]] || docker_local image inspect "$AI_IMAGE" >/dev/null
-    docker_local tag "$BOT_IMAGE" panel-admin-bot:local
-    [[ "$AI_IMAGE" == none ]] || docker_local tag "$AI_IMAGE" panel-admin-ai:local
+    local bot_reference="panel-admin-bot:checkpoint-${BOT_IMAGE#sha256:}" ai_reference="panel-admin-ai:checkpoint-${AI_IMAGE#sha256:}"
+    docker_local image inspect "$bot_reference" >/dev/null 2>&1 || bot_reference=$BOT_IMAGE
+    [[ "$AI_IMAGE" == none ]] || docker_local image inspect "$ai_reference" >/dev/null 2>&1 || ai_reference=$AI_IMAGE
+    docker_local image inspect "$bot_reference" >/dev/null || return
+    [[ "$AI_IMAGE" == none ]] || docker_local image inspect "$ai_reference" >/dev/null || return
+    docker_local tag "$bot_reference" panel-admin-bot:local || return
+    [[ "$AI_IMAGE" == none ]] || docker_local tag "$ai_reference" panel-admin-ai:local || return
 }
 
 prepare_update() {
@@ -208,6 +218,7 @@ prepare_update() {
     git -C "$REPO" fetch --no-tags origin >/dev/null 2>&1 || fail 'Не удалось получить исходники из origin.'
     git -C "$REPO" cat-file -e "$target^{commit}" || fail 'Коммит отсутствует в локальной истории.'
     git -C "$REPO" cat-file -e "$target:apps/telegram-admin/botctl" || fail 'Ревизия не поддерживает этот помощник.'
+    pin_record || fail 'Принятые образы недоступны для закрепления. Обновление не начато, контейнеры не менялись.'
     [[ ! -e "$OPS/previous.env" && ! -L "$OPS/previous.env" ]] || private_file "$OPS/previous.env"
     cp -- "$OPS/active.env" "$OPS/previous.env"; chmod 0600 "$OPS/previous.env"
     printf '%s\n' "$target" > "$OPS/pending"
@@ -215,23 +226,21 @@ prepare_update() {
     if compose build "${SERVICES[@]}" && check_configuration; then
         printf 'Ревизия подготовлена. Работающие контейнеры не менялись. Следующий шаг: botctl apply\n'
     else
-        retag_record
-        git -C "$REPO" checkout --detach "$REVISION" >/dev/null 2>&1
+        retag_record || fail 'Подготовка не удалась, образы отката недоступны. Контейнеры не пересоздавались; исходники и pending сохранены для восстановления.'
+        git -C "$REPO" checkout --detach "$REVISION" >/dev/null 2>&1 || fail 'Образы возвращены, но исходники вернуть не удалось. Контейнеры не менялись; pending сохранён.'
         rm -f -- "$OPS/pending"
         fail 'Подготовка не удалась: исходники и теги возвращены. Работающие контейнеры не менялись.'
     fi
 }
 
 prepare_rollback() {
-    optional_service business stop; optional_service voice stop; optional_service media stop
     clean_checkout
     read_record "$OPS/previous.env"
     [[ "$AI_MODE" != true || "$AI_IMAGE" != none ]] || fail 'Предыдущая ревизия без ai. Сначала явно измените режим в settings.'
     git -C "$REPO" cat-file -e "$REVISION:apps/telegram-admin/botctl" || fail 'Для этой старой ревизии нужен ручной откат по инструкции.'
-    docker_local image inspect "$BOT_IMAGE" >/dev/null
-    [[ "$AI_IMAGE" == none ]] || docker_local image inspect "$AI_IMAGE" >/dev/null
+    retag_record || fail 'Образы отката недоступны. Контейнеры и исходники не менялись.'
+    optional_service business stop; optional_service voice stop; optional_service media stop
     git -C "$REPO" checkout --detach "$REVISION" >/dev/null 2>&1
-    retag_record
     printf '%s\n' "$REVISION" > "$OPS/pending"
     printf 'Предыдущие исходники и образы подготовлены. Текущее состояние/настройки не откатывались. Следующий шаг: botctl apply\n'
 }

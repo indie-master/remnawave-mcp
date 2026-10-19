@@ -42,9 +42,18 @@ else if(command==='run'){
  if(process.env.MOCK_VALIDATION_FAIL)process.exit(2);
  const mount=args[args.indexOf('--mount')+1];const filename=mount.match(/src=([^,]+)/)[1];
  try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else if(args.at(-2)==='extensions')validateExtensionConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
-}else if(command==='compose'){if(args.includes('build')&&process.env.MOCK_BUILD_FAIL)process.exit(2);}
-else if(command==='image'){if(process.env.MOCK_IMAGE_GONE)process.exit(2);}
-else if(!['tag','stop','logs'].includes(command))process.exit(91);
+}else if(command==='compose'){if(args.includes('build')){fs.writeFileSync(process.env.MOCK_BUILT,'true');if(process.env.MOCK_BUILD_FAIL)process.exit(2);}}
+else if(command==='image'){
+ const reference=args.at(-1);
+ if(process.env.MOCK_IMAGE_GONE)process.exit(2);
+ if(process.env.MOCK_AFTER_BUILD_IMAGE_GONE&&fs.existsSync(process.env.MOCK_BUILT)&&reference.startsWith('sha256:'))process.exit(2);
+ if(process.env.MOCK_AFTER_BUILD_CHECKPOINT_GONE&&fs.existsSync(process.env.MOCK_BUILT)&&reference.includes(':checkpoint-'))process.exit(2);
+ if(reference.includes(':checkpoint-')&&(!fs.existsSync(process.env.MOCK_TAGS)||!JSON.parse(fs.readFileSync(process.env.MOCK_TAGS,'utf8')).includes(reference)))process.exit(2);
+}else if(command==='tag'){
+ if(process.env.MOCK_PIN_FAIL&&args.at(-1).includes(':checkpoint-'))process.exit(2);
+ if(process.env.MOCK_AFTER_BUILD_IMAGE_GONE&&fs.existsSync(process.env.MOCK_BUILT)&&args[1].startsWith('sha256:'))process.exit(2);
+ const tags=fs.existsSync(process.env.MOCK_TAGS)?JSON.parse(fs.readFileSync(process.env.MOCK_TAGS,'utf8')):[];tags.push(args.at(-1));fs.writeFileSync(process.env.MOCK_TAGS,JSON.stringify(tags));
+}else if(!['stop','logs'].includes(command))process.exit(91);
 `;
     const git = `#!/usr/bin/env node
 import fs from 'node:fs';
@@ -63,7 +72,7 @@ else if(command==='checkout'){
     for (const [name, content] of Object.entries({ docker, git, nano: '#!/usr/bin/env node\nimport fs from "node:fs";fs.writeFileSync(process.argv.at(-1),process.env.MOCK_EDIT_TEXT);\n' })) {
         writeFileSync(join(bin, name), content, { mode: 0o755 });
     }
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, MOCK_APP: app, MOCK_REPO: root, MOCK_LOG: log, MOCK_HEAD: join(root, 'mock-head') };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, MOCK_APP: app, MOCK_REPO: root, MOCK_LOG: log, MOCK_HEAD: join(root, 'mock-head'), MOCK_BUILT: join(root, 'mock-built'), MOCK_TAGS: join(root, 'mock-tags') };
     const run = (args, patch = {}) => spawnSync('bash', [join(app, 'botctl'), ...args], { env: { ...env, ...patch }, encoding: 'utf8', timeout: 10000 });
     const commands = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
     return { root, app, env, run, commands, log };
@@ -187,4 +196,41 @@ test('self-updating helper runs its immutable loaded implementation and does not
     const fixtureState = fixture(); fixtureState.run(['adopt']); assert.equal(fixtureState.run(['apply']).status, 0);
     assert.equal(fixtureState.run(['update', nextRevision], { MOCK_REWRITE: 'true' }).status, 0);
     assert.equal(readFileSync(join(fixtureState.app, 'ops-host.sh'), 'utf8'), 'exit 77\n');
+});
+
+test('update pins accepted images before building and can restore tags when bare IDs disappear', { skip: !hostTest }, () => {
+    const state = fixture(); state.run(['adopt']); assert.equal(state.run(['apply']).status, 0);
+    writeFileSync(state.log, '');
+    const result = state.run(['update', nextRevision], { MOCK_VALIDATION_FAIL: 'true', MOCK_AFTER_BUILD_IMAGE_GONE: 'true' });
+    assert.notEqual(result.status, 0);
+    const commands = state.commands();
+    const buildIndex = commands.findIndex(args => args.includes('compose') && args.includes('build'));
+    for (const service of ['bot', 'ai']) {
+        const pinIndex = commands.findIndex(args => args.includes('tag') && args.at(-1).startsWith(`panel-admin-${service}:checkpoint-`));
+        assert.ok(pinIndex >= 0 && pinIndex < buildIndex);
+        assert.ok(commands.some(args => args.includes('tag') && args.at(-1) === `panel-admin-${service}:local` && args.at(-2).startsWith(`panel-admin-${service}:checkpoint-`)));
+    }
+    assert.equal(readFileSync(state.env.MOCK_HEAD, 'utf8'), revision);
+    assert.ok(!existsSync(join(state.app, '.ops/pending')));
+    assert.ok(!commands.some(args => args.includes('up') || args.includes('stop') || args.includes('prune')));
+});
+
+test('unavailable rollback images refuse update before checkout or build, without stopping services', { skip: !hostTest }, () => {
+    const state = fixture(); state.run(['adopt']); assert.equal(state.run(['apply']).status, 0);
+    writeFileSync(state.log, '');
+    assert.notEqual(state.run(['update', nextRevision], { MOCK_PIN_FAIL: 'true' }).status, 0);
+    assert.ok(!existsSync(join(state.app, '.ops/pending')));
+    assert.ok(!state.commands().some(args => args.includes('checkout') || args.includes('build') || args.includes('up') || args.includes('stop')));
+    assert.equal(readFileSync(join(state.app, '.env'), 'utf8'), base);
+});
+
+test('external deletion of rollback references keeps pending and reports incomplete recovery honestly', { skip: !hostTest }, () => {
+    const state = fixture(); state.run(['adopt']); assert.equal(state.run(['apply']).status, 0);
+    writeFileSync(state.log, '');
+    const result = state.run(['update', nextRevision], { MOCK_VALIDATION_FAIL: 'true', MOCK_AFTER_BUILD_IMAGE_GONE: 'true', MOCK_AFTER_BUILD_CHECKPOINT_GONE: 'true' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /исходники и pending сохранены/);
+    assert.equal(readFileSync(state.env.MOCK_HEAD, 'utf8'), nextRevision);
+    assert.equal(readFileSync(join(state.app, '.ops/pending'), 'utf8').trim(), nextRevision);
+    assert.ok(!state.commands().some(args => args.includes('up') || args.includes('stop')));
 });
