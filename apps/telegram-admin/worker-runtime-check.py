@@ -54,13 +54,18 @@ def check_worker(kind):
             with wave.open(audio_path, 'wb') as audio:
                 audio.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
                 audio.writeframes(bytes(64000))
-            result = subprocess.run([sys.executable, filename, '--decode', audio_path, '30'], capture_output=True, timeout=42)
+            decoder = 'import importlib.util,sys; spec=importlib.util.spec_from_file_location("synthetic_voice_worker",sys.argv[1]); worker=importlib.util.module_from_spec(spec); spec.loader.exec_module(worker); worker.transcribe(sys.argv[2],30)'
+            result = subprocess.run([sys.executable, '-c', decoder, filename, audio_path], capture_output=True, timeout=42)
             assert result.returncode == 0, f'SYNTHETIC_DECODE_FAILED exit={result.returncode}: {result.stderr.decode(errors="replace")[:1000]}'
             assert len(result.stdout) <= 4096
             decoded = json.loads(result.stdout)
             assert isinstance(decoded.get('text'), str)
             assert len(decoded['text']) <= 500
             assert decoded.get('confident') is False
+            wrapped = subprocess.run([sys.executable, filename, '--decode', audio_path, '30'], capture_output=True, timeout=42)
+            assert wrapped.returncode == 0, f'SYNTHETIC_DECODE_CLI_FAILED exit={wrapped.returncode}'
+            assert len(wrapped.stdout) <= 4096
+            assert json.loads(wrapped.stdout).get('confident') is False
 
     print(json.dumps({'worker': kind, 'uid': os.getuid(), 'directoryMode': '0755', 'sourceMode': '0444', 'unixEndpoint': True, 'syntheticDecode': kind == 'voice', 'network': False}))
 
