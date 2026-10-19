@@ -31,6 +31,6 @@ export function createVoiceInput({ api, allowedUserId, transcribe = transcribeVo
         last = now();
         const bytes = await api.downloadVoice(voice.file_id, maxBytes);
         const text = await transcribe(bytes, { maxSeconds });
-        return { ...update, message: { ...message, voice: undefined, text } };
+        return { ...update, inputSource: 'local-voice', message: { ...message, voice: undefined, text } };
     };
 }

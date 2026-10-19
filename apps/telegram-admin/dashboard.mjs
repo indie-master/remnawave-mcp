@@ -26,6 +26,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     if (!Number.isSafeInteger(allowedUserId) || allowedUserId <= 0) throw new Error('INVALID_ADMIN_ID');
     const reports = new Map();
     const drafts = new Map();
+    const voiceRequests = new Map();
     let lastUpdateId = -1;
     let lastRead = -Infinity;
     let busy = false;
@@ -117,8 +118,19 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         }
         try {
             const data = callback?.data;
-            const text = callback ? '' : message.text.trim();
-            if (adminHandle) {
+            let text = callback ? '' : message.text.trim();
+            let voiceApproved = false;
+            const voiceConfirmation = data?.match(/^(voice_ai|voice_cancel):([A-Za-z0-9_-]{8,24})$/);
+            if (voiceConfirmation) {
+                const pending = voiceRequests.get(voiceConfirmation[2]);
+                voiceRequests.delete(voiceConfirmation[2]);
+                if (!pending || now() < pending.savedAt || now() - pending.savedAt >= 180000) return reply('Подтверждение голосовой команды устарело или уже использовано. ИИ не вызывался.');
+                if (voiceConfirmation[1] === 'voice_cancel') return reply('Голосовая команда отменена. ИИ не вызывался.');
+                text = pending.text;
+                voiceApproved = true;
+                onDiagnostic({ event: 'voice_intent', source: 'confirmation', ok: true });
+            }
+            if (adminHandle && !voiceApproved) {
                 const result = await adminHandle({ text, data, allowedUserId });
                 if (result) return reply(result.text, result.reply_markup);
             }
@@ -168,7 +180,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 if (!expiryWindows.includes(intent.days) || (intent.action !== 'expiring' && query[2] !== undefined)) throw new Error('INVALID_ACTION');
                 source = 'direct';
             } else if (command && reportActions.includes(command[1]) && command[1] !== 'expiring') { intent = { action: command[1], days: 3 }; source = 'direct'; }
-            else if (callback || text.startsWith('/')) return reply('Неизвестная команда. Используйте кнопки или /menu.');
+            else if ((callback && !voiceApproved) || text.startsWith('/')) return reply('Неизвестная команда. Используйте кнопки или /menu.');
             if (!intent && enhancedUi) {
                 const validContext = context && now() >= context.savedAt && now() - context.savedAt < 600000 ? context.intent : undefined;
                 const local = resolveLocalRequest(text, { context: validContext });
@@ -178,6 +190,21 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                     intent = local.intent;
                     source = mcpRead ? 'mcp' : 'direct';
                     onDiagnostic({ event: 'intent', source: 'local', ok: true });
+                }
+            }
+            if (!intent && !callback && update.inputSource === 'local-voice') {
+                const known = classify?.resolveKnown?.(text);
+                if (known && mcpRead) {
+                    intent = validateIntent(known);
+                    source = 'mcp';
+                } else {
+                    if (!classify || !mcpRead) return reply(`<b>🎙 Распознано локально:</b>\n${escapeHtml(text)}\n\nКоманда не найдена локально, а ИИ не подключён. Используйте кнопки. ИИ не вызывался.`);
+                    voiceRequests.clear();
+                    const key = nonce();
+                    if (!/^[A-Za-z0-9_-]{8,24}$/.test(key)) throw new Error('INVALID_VOICE_CONFIRMATION_KEY');
+                    voiceRequests.set(key, { text, savedAt: now() });
+                    onDiagnostic({ event: 'voice_intent', source: 'confirmation_required', ok: true });
+                    return reply(`<b>🎙 Распознано локально:</b>\n${escapeHtml(text)}\n\nКоманда не найдена среди локальных и сохранённых. Передать этот текст ИИ? Это может израсходовать одну попытку. До подтверждения ИИ не вызывался. Подтверждение действует 3 минуты.`, keyboard([[button('🧠 Разобрать с ИИ', `voice_ai:${key}`), button('✖ Отмена', `voice_cancel:${key}`)], [button('🏠 Меню', 'home')]]));
                 }
             }
             if (busy || now() - lastRead < 5000) return reply('Дождитесь завершения запроса и повторите через пять секунд.');
