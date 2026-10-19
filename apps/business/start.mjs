@@ -7,6 +7,7 @@ import { createReferenceSearch } from './reference-search.mjs';
 import { createMediaAnalyzer } from './media-client.mjs';
 import { validateBusinessEnv } from './config.mjs';
 import { createGuideLibrary } from './guides.mjs';
+import { createBillingAdministration } from './billing-admin.mjs';
 
 let store; let portal; let administration;
 try {
@@ -16,7 +17,7 @@ const enabled = name => { if (!['true', 'false'].includes(process.env[name] ?? '
 if (!enabled('PORTAL_ENABLED')) throw new Error('PORTAL_NOT_AUTHORIZED');
 mkdirSync('/state', { recursive: true, mode: 0o700 });
 mkdirSync('/business-bridge', { recursive: true, mode: 0o700 });
-store = createBusinessStore({ filename: '/state/business.sqlite' });
+store = createBusinessStore({ filename: '/state/business.sqlite', reconciliationEnabled: enabled('BILLING_RECONCILIATION_ENABLED'), reviewDelayMs: Number(process.env.BILLING_REVIEW_DELAY_SECONDS ?? 900) * 1000 });
 for (const item of JSON.parse(readFileSync(new URL('./faq.json', import.meta.url), 'utf8'))) store.addKnowledge(item.id, item.aliases, item.answer);
 const supportAi = enabled('SUPPORT_AI_ENABLED');
 const support = createSupport({ store, search: enabled('SEARCH_ENABLED') ? createReferenceSearch({ store, allowedHosts: (process.env.SEARCH_ALLOWED_HOSTS ?? 'docs.rw').split(','), dailyLimit: Number(process.env.SEARCH_DAILY_LIMIT ?? 0) }) : undefined, answer: supportAi ? value => new Promise((resolve, reject) => {
@@ -34,10 +35,12 @@ portal = createPortal({ store, support, origin: process.env.PORTAL_PUBLIC_ORIGIN
 } : undefined });
 const socket = '/business-bridge/admin.sock';
 if (existsSync(socket)) { if (!statSync(socket).isSocket()) throw new Error('INVALID_BUSINESS_SOCKET'); unlinkSync(socket); }
+const billingAdministration = createBillingAdministration({ store, enabled: manualBilling });
 administration = createServer(async (incoming, outgoing) => {
     const send = (status, value) => outgoing.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
     try {
-        if (incoming.method === 'GET' && incoming.url === '/pending') { send(200, { payments: store.pendingPayments(), renewals: store.pendingRenewals(), support: store.pendingSupport() }); return; }
+        if (await billingAdministration(incoming, outgoing)) return;
+        if (incoming.method === 'GET' && incoming.url === '/pending') { send(200, { payments: store.pendingPayments(), renewals: store.pendingRenewals(), support: store.pendingSupport(), features: { reconciliation: manualBilling && store.reconciliationEnabled } }); return; }
         if (incoming.method === 'GET' && /^\/support\/[a-f0-9]{24}$/.test(incoming.url)) { send(200, store.supportThread(incoming.url.split('/').at(-1))); return; }
         if (incoming.method === 'GET' && /^\/media\/[a-f0-9]{24}$/.test(incoming.url)) { send(200, store.mediaReview(incoming.url.split('/').at(-1))); return; }
         if (incoming.method !== 'POST' || !['/approve', '/reject', '/support-reply', '/renewal-reserve', '/renewal-settle', '/media-approve'].includes(incoming.url) || incoming.headers['content-type'] !== 'application/json') throw new Error();

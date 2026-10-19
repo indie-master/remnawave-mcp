@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { exportState, restoreState } from './state-transfer.mjs';
+import { createBusinessStore } from '../business/store.mjs';
 const revision = 'a'.repeat(40);
 function fixture() {
     const directory = mkdtempSync(join(tmpdir(), 'panel-state-transfer-'));
@@ -43,4 +44,34 @@ test('restore validates every hash before writing and rejects wrong revision and
         writeFileSync(join(state.destination, 'manifest.json'), JSON.stringify(manifest));
         assert.throws(() => restoreState({ snapshot: state.destination, targets: state.targets, revision }));
     } finally { state.close(); }
+});
+
+test('financial state transfer preserves the reserve, review deadline and audit but revokes customer sessions', () => {
+    const state = fixture();
+    const clock = Date.parse('2026-10-19T10:00:00Z');
+    let original;
+    let restored;
+    try {
+        original = createBusinessStore({ filename: join(state.sources.business, 'business.sqlite'), reconciliationEnabled: true, reviewDelayMs: 300000, now: () => clock });
+        const account = original.provision('transfer@example.invalid', 'synthetic-password-only', 42).id;
+        const payment = original.payment(account, 'RUB', 10000);
+        original.approvePayment(payment.id, 'test:transfer-receipt');
+        const renewal = original.requestRenewal(account, 'RUB', { units: 3000, days: 30 });
+        original.reserveRenewal(renewal.id, 'P'.repeat(16));
+        original.settleRenewal(renewal.id, 'uncertain');
+        const session = original.login('transfer@example.invalid', 'synthetic-password-only', 'local');
+        original.close(); original = undefined;
+        exportState({ sources: state.sources, destination: state.destination, revision });
+        restoreState({ snapshot: state.destination, targets: state.targets, revision });
+        restored = createBusinessStore({ filename: join(state.targets.business, 'business.sqlite'), reconciliationEnabled: true, reviewDelayMs: 300000, now: () => clock + 300000 });
+        assert.throws(() => restored.session(session.token), /SESSION_EXPIRED/);
+        assert.equal(restored.account(account).balances.RUB, 7000);
+        assert.equal(restored.renewals(account)[0].state, 'uncertain');
+        assert.ok(restored.billingHistory().some(entry => entry.subject === renewal.id && entry.state === 'uncertain'));
+        const item = restored.recoveryCase(renewal.id);
+        assert.equal(item.readyAt, clock + 300000);
+        restored.reconcileRenewal(renewal.id, { ...item, outcome: 'refunded', note: 'Панель и журналы проверены вручную' });
+        assert.equal(restored.account(account).balances.RUB, 10000);
+        assert.throws(() => restored.reconcileRenewal(renewal.id, { ...item, outcome: 'refunded', note: 'Панель и журналы проверены вручную' }));
+    } finally { original?.close(); restored?.close(); state.close(); }
 });

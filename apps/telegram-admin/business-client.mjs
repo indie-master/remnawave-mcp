@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 
 export function createBusinessClient({ requestImpl = request } = {}) {
     return (path, value) => new Promise((resolve, reject) => {
-        if (!['/pending', '/approve', '/reject', '/support-reply', '/renewal-reserve', '/renewal-settle', '/media-approve'].includes(path) && !/^\/(?:support|media)\/[a-f0-9]{24}$/.test(path)) { reject(new Error('BUSINESS_UNAVAILABLE')); return; }
+        if (!['/pending', '/approve', '/reject', '/support-reply', '/renewal-reserve', '/renewal-settle', '/media-approve', '/recovery', '/billing-history', '/renewal-reconcile'].includes(path) && !/^\/(?:support|media|recovery)\/[a-f0-9]{24}$/.test(path)) { reject(new Error('BUSINESS_UNAVAILABLE')); return; }
         const call = requestImpl({ socketPath: '/business-bridge/admin.sock', method: value === undefined ? 'GET' : 'POST', path, headers: { 'Content-Type': 'application/json' }, timeout: path === '/media-approve' ? 55000 : 5000 }, response => {
             let body = ''; response.on('data', chunk => { body += chunk; if (body.length > 16384) response.destroy(); });
             response.on('error', () => reject(new Error('BUSINESS_UNAVAILABLE')));
@@ -21,9 +21,44 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
         if (allowedUserId !== actorId) return null;
         const supportReply = text?.match(/^ответ\s+([a-f0-9]{24})\s+([\s\S]{1,1000})$/i);
         const paymentReference = text?.match(/^плат[её]ж\s+([a-f0-9]{24})\s+([A-Za-z][A-Za-z0-9_-]{1,19}:[A-Za-z0-9:_-]{4,100})$/i);
-        if (/^(?:плат[её]ж|ответ)(?:\s|$)/i.test(text ?? '') && !paymentReference && !supportReply) return reply('Формат: «платеж ID система:ID-операции» или «ответ ID текст». Запрос к ИИ не выполнялся.');
-        if (!supportReply && !paymentReference && !['оплаты', '/payments', 'поддержка'].includes(text) && !/^(?:business_home|business_support|business_renewals|bm:[a-f0-9]{24}|mc:[A-Za-z0-9_-]{16}|br:[a-f0-9]{24}|rc:[A-Za-z0-9_-]{16}|bh:[a-f0-9]{24}|bp:[a-f0-9]{24}|bc:[A-Za-z0-9_-]{16}|bx:[A-Za-z0-9_-]{16})$/.test(data ?? '')) return null;
+        const reconciliation = text?.match(/^сверка\s+([a-f0-9]{24})\s+(выполнено|возврат)\s+([^\r\n]{8,200})$/i);
+        if (/^(?:плат[её]ж|ответ|сверка)(?:\s|$)/i.test(text ?? '') && !paymentReference && !supportReply && !reconciliation) return reply('Формат: «платеж ID система:ID-операции», «ответ ID текст» или «сверка ID выполнено|возврат основание проверки». Запрос к ИИ не выполнялся.');
+        if (!supportReply && !paymentReference && !reconciliation && !['оплаты', '/payments', 'поддержка'].includes(text) && !/^(?:business_home|business_support|business_renewals|business_recovery|business_history|bv:[a-f0-9]{24}|rv:[A-Za-z0-9_-]{16}|bm:[a-f0-9]{24}|mc:[A-Za-z0-9_-]{16}|br:[a-f0-9]{24}|rc:[A-Za-z0-9_-]{16}|bh:[a-f0-9]{24}|bp:[a-f0-9]{24}|bc:[A-Za-z0-9_-]{16}|bx:[A-Za-z0-9_-]{16})$/.test(data ?? '')) return null;
         try {
+            if (data === 'business_recovery') {
+                const result = await call('/recovery');
+                if (!Array.isArray(result.cases)) throw new Error();
+                return reply('<b>Продления на ручной сверке</b>\nАвтоматического повтора PATCH и возврата нет. Сначала проверьте панель и журналы.', [...result.cases.filter(value => /^[a-f0-9]{24}$/.test(value.id) && Number.isSafeInteger(value.panel_id)).slice(0, 10).map(value => [{ text: `#${value.panel_id} · ${value.state}`, callback_data: `bv:${value.id}` }]), [{ text: 'История операций', callback_data: 'business_history' }], [{ text: 'Назад', callback_data: 'business_home' }]]);
+            }
+            if (data === 'business_history') {
+                const result = await call('/billing-history');
+                if (!Array.isArray(result.entries)) throw new Error();
+                return reply('<b>История биллинга</b>\n' + result.entries.slice(0, 10).map(entry => `${escape(entry.operation)} · ${escape(entry.state)}\n<code>${escape(entry.subject)}</code>\n${escape(new Date(entry.created).toISOString())}${entry.note ? '\n' + escape(String(entry.note).slice(0, 200)) : ''}`).join('\n\n'), [[{ text: 'Назад', callback_data: 'business_home' }]]);
+            }
+            if (data?.startsWith('bv:') || reconciliation) {
+                const id = reconciliation?.[1] ?? data.slice(3);
+                const item = await call('/recovery/' + id);
+                if (item.id !== id || !Number.isSafeInteger(item.panel_id) || !Number.isSafeInteger(item.readyAt) || !['executing', 'uncertain'].includes(item.state) || !/^[A-Za-z0-9_-]{16}$/.test(item.proposal)) throw new Error();
+                if (!reconciliation) return reply(`<b>Сверка продления #${item.panel_id}</b>\nID: <code>${id}</code>\nСостояние: ${escape(item.state)}\nРезерв: ${escape(item.units)} минимальных единиц ${escape(item.currency)}\nСверка доступна после: ${escape(new Date(item.readyAt).toISOString())}\n\nПроверьте панель и журналы: нет ли запроса, который ещё выполняется. Затем напишите:\n<code>сверка ${id} выполнено основание</code>\nили\n<code>сверка ${id} возврат основание</code>\nНужна отдельная кнопка подтверждения. Эти действия меняют только учёт баланса, не панель.`, [...(administration ? [[{ text: 'Проверить карточку', callback_data: `au:${item.panel_id}` }]] : []), [{ text: 'Назад', callback_data: 'business_recovery' }]]);
+                if (now() < item.readyAt) return reply('Защитная задержка сверки ещё не истекла. Средства остаются в резерве; панель не изменяется.');
+                const outcome = reconciliation[2].toLowerCase() === 'возврат' ? 'refunded' : 'done';
+                if (administration?.hasInFlight?.(actorId)) return reply('Административный запрос ещё выполняется. Сверка и возврат пока запрещены.');
+                if (outcome === 'refunded' && !administration) return reply('Для возврата нужно отдельно включить административные карточки и проверить результат исходной операции.');
+                if (outcome === 'refunded' && administration?.receipt(actorId, item.proposal) === 'done') return reply('Панель уже подтвердила операцию. Возврат этого резерва запрещён; сначала сверяйте историю и фактическую подписку.');
+                while (previews.size >= 20) previews.delete(previews.keys().next().value);
+                const key = randomBytes(12).toString('base64url');
+                previews.set(key, { reconciliation: true, id, state: item.state, proposal: item.proposal, outcome, note: reconciliation[3], at: now() });
+                return reply(`<b>Ручная сверка #${item.panel_id}</b>\n${outcome === 'done' ? 'Зафиксировать выполненное продление; резерв остаётся списанным.' : 'Вернуть резерв на баланс один раз. Продление повторно не отправляется.'}\nОснование: ${escape(reconciliation[3])}\n\nПодтверждайте только после проверки панели и журналов: незавершённых запросов быть не должно. Это не повтор API-операции и не автоматическое доказательство её результата.`, [[{ text: '✅ Сверено вручную', callback_data: `rv:${key}` }, { text: 'Отмена', callback_data: `bx:${key}` }]]);
+            }
+            if (data?.startsWith('rv:')) {
+                const value = previews.get(data.slice(3)); previews.delete(data.slice(3));
+                if (!value?.reconciliation || now() < value.at || now() - value.at >= 180000) return reply('Подтверждение сверки устарело или использовано.');
+                if (administration?.hasInFlight?.(actorId) || (value.outcome === 'refunded' && !administration)) return reply('Сверка сейчас запрещена: проверьте административный модуль и незавершённые запросы.');
+                if (value.outcome === 'refunded' && administration?.receipt(actorId, value.proposal) === 'done') return reply('Панель подтвердила операцию. Возврат резерва запрещён.');
+                const settled = await call('/renewal-reconcile', { id: value.id, state: value.state, proposal: value.proposal, outcome: value.outcome, note: value.note });
+                if (settled?.settled !== true || settled.outcome !== value.outcome) throw new Error();
+                return reply('✅ Сверка зафиксирована в журнале. ' + (value.outcome === 'done' ? 'Продление отмечено выполненным.' : 'Резерв возвращён на баланс один раз.') + ' Запрос к панели не отправлялся.');
+            }
             if (supportReply) { await call('/support-reply', { id: supportReply[1], text: supportReply[2] }); return reply('Ответ сохранён в истории кабинета клиента. В Telegram клиенту ничего не отправлялось.'); }
             if (data?.startsWith('bh:')) {
                 const thread = await call('/support/' + data.slice(3));
@@ -43,7 +78,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
                 const result = await call('/media-approve', { id: media.id });
                 return reply(escape(result.reply ?? 'Текст проверен. Ответ доступен в истории клиента.'));
             }
-            if (data?.startsWith('bx:')) { previews.delete(data.slice(3)); return reply('Подтверждение отменено; деньги не зачислены.'); }
+            if (data?.startsWith('bx:')) { previews.delete(data.slice(3)); return reply('Подтверждение отменено; новых операций не отправлялось.'); }
             if (data?.startsWith('bc:')) {
                 const value = previews.get(data.slice(3)); previews.delete(data.slice(3));
                 if (!value || now() - value.at > 180000) return reply('Подтверждение устарело.');
@@ -91,7 +126,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
             }
             const payments = pending.payments.filter(value => /^[a-f0-9]{24}$/.test(value.id) && ['RUB', 'USDT'].includes(value.currency) && Number.isSafeInteger(value.units));
             const renewals = pending.renewals.filter(value => /^[a-f0-9]{24}$/.test(value.id) && Number.isSafeInteger(value.panel_id));
-            return reply(`<b>Оплаты: ${payments.length}</b>\nПоказаны кнопки первых 10; после подтверждения обновите список.\nПодтверждение только после проверки поступления.\n\n<b>Заявки продления: ${renewals.length}</b>\nПродление и списание требуют отдельного подтверждения.`, [...payments.slice(0, 10).map(value => [{ text: `${value.currency} ${value.units / (value.currency === 'RUB' ? 100 : 1000000)} · ${value.id.slice(0, 6)}`, callback_data: `bp:${value.id}` }]), [{ text: '⏳ Продления', callback_data: 'business_renewals' }], [{ text: '🛟 Обращения поддержки', callback_data: 'business_support' }], [{ text: '🏠 Меню', callback_data: 'home' }]]);
+            return reply(`<b>Оплаты: ${payments.length}</b>\nПоказаны кнопки первых 10; после подтверждения обновите список.\nПодтверждение только после проверки поступления.\n\n<b>Заявки продления: ${renewals.length}</b>\nПродление и списание требуют отдельного подтверждения.`, [...payments.slice(0, 10).map(value => [{ text: `${value.currency} ${value.units / (value.currency === 'RUB' ? 100 : 1000000)} · ${value.id.slice(0, 6)}`, callback_data: `bp:${value.id}` }]), [{ text: '⏳ Продления', callback_data: 'business_renewals' }], ...(pending.features?.reconciliation === true ? [[{ text: '🔎 Ручная сверка', callback_data: 'business_recovery' }, { text: '🗒 Журнал', callback_data: 'business_history' }]] : []), [{ text: '🛟 Обращения поддержки', callback_data: 'business_support' }], [{ text: '🏠 Меню', callback_data: 'home' }]]);
         } catch { return reply('Бизнес-модуль недоступен. Подтверждение оплаты не повторяется автоматически.'); }
     };
 }

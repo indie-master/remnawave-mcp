@@ -8,9 +8,9 @@ import { validateBusinessEnv } from '../business/config.mjs';
 
 export const baseKeys = ['REMNAWAVE_BASE_URL', 'BOT_USERNAME', 'TELEGRAM_ADMIN_ID', 'PANEL_USERS_READ_ENABLED'];
 export const controlKeys = ['AI_ENABLED', 'BOT_ENHANCED_UI', 'AI_DAILY_LIMIT', 'PANEL_ALLOWED_REPORTS'];
-export const extensionKeys = ['BOT_AUTO_MENU', 'VOICE_ENABLED', 'VOICE_MAX_SECONDS', 'VOICE_MAX_BYTES', 'ADMIN_USER_READ_ENABLED', 'ADMIN_WRITE_ENABLED', 'ADMIN_ALLOWED_FIELDS', 'BUSINESS_ENABLED', 'SUPPORT_AI_ENABLED'];
+export const extensionKeys = ['BOT_AUTO_MENU', 'VOICE_ENABLED', 'VOICE_MAX_SECONDS', 'VOICE_MAX_BYTES', 'ADMIN_USER_READ_ENABLED', 'ADMIN_WRITE_ENABLED', 'ADMIN_ALLOWED_FIELDS', 'ADMIN_RENEWAL_DAYS', 'BUSINESS_ENABLED', 'SUPPORT_AI_ENABLED'];
 export function validateExtensionConfiguration(text) { return readExtensions(parsePrivateEnv(text, extensionKeys)); }
-export function validateBusinessConfiguration(text) { return validateBusinessEnv(parsePrivateEnv(text, ['PORTAL_ENABLED', 'PORTAL_PUBLIC_ORIGIN', 'PORTAL_PANEL_READ_ENABLED', 'REMNAWAVE_BASE_URL', 'BILLING_MANUAL_ENABLED', 'SUPPORT_AI_ENABLED', 'PLAN_DAYS', 'PLAN_RUB_UNITS', 'PLAN_USDT_UNITS', 'SEARCH_ENABLED', 'SEARCH_DAILY_LIMIT', 'SEARCH_ALLOWED_HOSTS', 'MEDIA_ENABLED', 'MEDIA_MAX_BYTES', 'MEDIA_ALLOWED_APPS'])); }
+export function validateBusinessConfiguration(text) { return validateBusinessEnv(parsePrivateEnv(text, ['PORTAL_ENABLED', 'PORTAL_PUBLIC_ORIGIN', 'PORTAL_PANEL_READ_ENABLED', 'REMNAWAVE_BASE_URL', 'BILLING_MANUAL_ENABLED', 'BILLING_RECONCILIATION_ENABLED', 'BILLING_REVIEW_DELAY_SECONDS', 'SUPPORT_AI_ENABLED', 'PLAN_DAYS', 'PLAN_RUB_UNITS', 'PLAN_USDT_UNITS', 'SEARCH_ENABLED', 'SEARCH_DAILY_LIMIT', 'SEARCH_ALLOWED_HOSTS', 'MEDIA_ENABLED', 'MEDIA_MAX_BYTES', 'MEDIA_ALLOWED_APPS'])); }
 
 export function parsePrivateEnv(text, keys) {
     if (typeof text !== 'string' || Buffer.byteLength(text) > 4096 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) throw new Error('INVALID_PRIVATE_CONFIGURATION');

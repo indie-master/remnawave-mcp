@@ -93,7 +93,7 @@ jobs:
         run: |
           if docker run --rm --network none --tmpfs /state:rw,uid=1000,gid=1000,size=16m --tmpfs /business-bridge:rw,uid=1000,gid=1000,size=1m panel-admin-business:ci; then exit 1; fi
           test "$(docker run --rm --network none --entrypoint id panel-admin-business:ci -u)" = "1000"
-          docker run --rm --network none --read-only --entrypoint node panel-admin-business:ci --input-type=module -e 'for (const name of ["config", "store", "portal", "reference-search", "media-client", "guides"]) await import("/app/apps/business/" + name + ".mjs"); console.log("Public business modules readable as non-root; no credentials used.");'
+          docker run --rm --network none --read-only --entrypoint node panel-admin-business:ci --input-type=module -e 'for (const name of ["config", "store", "portal", "reference-search", "media-client", "guides", "billing-admin"]) await import("/app/apps/business/" + name + ".mjs"); console.log("Public business modules readable as non-root; no credentials used.");'
       - name: Build local-only voice decoder with a pinned public model revision
         run: docker build -f apps/telegram-admin/Dockerfile.voice -t panel-admin-voice:ci .
       - name: Voice model loads with all runtime network access disabled

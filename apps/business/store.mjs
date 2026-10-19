@@ -8,7 +8,8 @@ const unitsValid = value => Number.isSafeInteger(value) && value > 0 && value <=
 export const redactSupport = value => String(value).replace(/https?:\/\/\S+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|\b\d{5,20}:[A-Za-z0-9_-]{30,}\b|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\b(?:\d{1,3}\.){3}\d{1,3}\b/gi, '[скрыто]').slice(0, 500);
 const normalize = value => redactSupport(value).normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ').trim();
 
-export function createBusinessStore({ filename, now = Date.now }) {
+export function createBusinessStore({ filename, now = Date.now, reconciliationEnabled = false, reviewDelayMs = 900000 }) {
+    if (typeof reconciliationEnabled !== 'boolean' || !Number.isSafeInteger(reviewDelayMs) || reviewDelayMs < 300000 || reviewDelayMs > 86400000) throw new Error('INVALID_RECONCILIATION_CONFIGURATION');
     const database = new DatabaseSync(filename);
     database.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=3000;
         CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password TEXT NOT NULL, panel_id INTEGER NOT NULL);
@@ -26,11 +27,16 @@ export function createBusinessStore({ filename, now = Date.now }) {
         CREATE TABLE IF NOT EXISTS search_quota (day TEXT PRIMARY KEY, used INTEGER NOT NULL, last INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS media_permissions (account TEXT PRIMARY KEY, question TEXT NOT NULL, expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS media_reviews (id TEXT PRIMARY KEY, account TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS renewal_clock (id TEXT PRIMARY KEY, started INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_audit (id INTEGER PRIMARY KEY, operation TEXT NOT NULL, subject TEXT NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, note TEXT NOT NULL);
     `);
+    database.prepare("INSERT OR IGNORE INTO renewal_clock SELECT id,? FROM renewal_requests WHERE state IN ('executing','uncertain')").run(now());
+    const audit = (operation, subject, state, note = '') => database.prepare('INSERT INTO billing_audit(operation,subject,state,created,note) VALUES (?,?,?,?,?)').run(operation, subject, state, now(), note);
     const transact = work => { database.exec('BEGIN IMMEDIATE'); try { const result = work(); database.exec('COMMIT'); return result; } catch (error) { database.exec('ROLLBACK'); throw error; } };
     const account = id => { const value = database.prepare('SELECT id,email,panel_id FROM accounts WHERE id=?').get(id); if (!value) throw new Error('ACCOUNT_UNAVAILABLE'); return value; };
     const balance = (id, currency) => database.prepare('SELECT coalesce(sum(units),0) AS balance FROM ledger WHERE account=? AND currency=?').get(id, currency).balance;
     const api = {
+        reconciliationEnabled,
         provision(email, password, panelId) {
             if (!emailAddress(email) || typeof password !== 'string' || password.length < 12 || password.length > 128 || !Number.isSafeInteger(panelId) || panelId <= 0) throw new Error('INVALID_ACCOUNT');
             const id = randomBytes(12).toString('hex'); const salt = randomBytes(16).toString('hex');
@@ -81,18 +87,54 @@ export function createBusinessStore({ filename, now = Date.now }) {
                 database.prepare('INSERT INTO manual_receipts VALUES (?,?)').run(hash(reference.toLowerCase()), paymentId);
                 database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run(paymentId, row.account, row.currency, row.units, now());
                 database.prepare('UPDATE payments SET state=? WHERE id=?').run('approved', paymentId);
+                audit('payment', paymentId, 'approved');
                 return { credited: true, currency: row.currency, units: row.units };
             });
         },
-        rejectPayment(paymentId) { database.prepare('UPDATE payments SET state=? WHERE id=? AND state=?').run('rejected', paymentId, 'pending'); },
+        rejectPayment(paymentId) { return transact(() => { const result = database.prepare('UPDATE payments SET state=? WHERE id=? AND state=?').run('rejected', paymentId, 'pending'); if (result.changes) audit('payment', paymentId, 'rejected'); return { rejected: result.changes === 1 }; }); },
         requestRenewal(id, currency, plan) {
             account(id);
             if (!currencyValid(currency) || !plan || !unitsValid(plan.units) || !Number.isInteger(plan.days) || plan.days < 1 || plan.days > 366) throw new Error('RENEWAL_PLAN_UNAVAILABLE');
             if (balance(id, currency) < plan.units) throw new Error('INSUFFICIENT_BALANCE');
-            if (database.prepare('SELECT id FROM renewal_requests WHERE account=? AND state=?').get(id, 'pending')) throw new Error('RENEWAL_PENDING');
-            const requestId = randomBytes(12).toString('hex');
-            database.prepare('INSERT INTO renewal_requests VALUES (?,?,?,?,?,?,?,NULL)').run(requestId, id, 'pending', now(), currency, plan.units, plan.days);
-            return { id: requestId, state: 'pending', note: 'Запрос передан администратору. Подписка пока не продлена, баланс не списан.' };
+            return transact(() => {
+                if (balance(id, currency) < plan.units) throw new Error('INSUFFICIENT_BALANCE');
+                if (database.prepare("SELECT id FROM renewal_requests WHERE account=? AND state IN ('pending','executing','uncertain')").get(id)) throw new Error('RENEWAL_PENDING');
+                const requestId = randomBytes(12).toString('hex');
+                database.prepare('INSERT INTO renewal_requests VALUES (?,?,?,?,?,?,?,NULL)').run(requestId, id, 'pending', now(), currency, plan.units, plan.days);
+                audit('renewal', requestId, 'pending');
+                return { id: requestId, state: 'pending', note: 'Запрос передан администратору. Подписка пока не продлена, баланс не списан.' };
+            });
+        },
+        renewals(id) { account(id); return database.prepare('SELECT id,currency,units,days,state,created FROM renewal_requests WHERE account=? ORDER BY created DESC,id DESC LIMIT 20').all(id); },
+        billingHistory() { return database.prepare('SELECT operation,subject,state,created,note FROM billing_audit ORDER BY created DESC,id DESC LIMIT 20').all(); },
+        recoveryCases() {
+            if (!reconciliationEnabled) throw new Error('RECONCILIATION_DISABLED');
+            return database.prepare("SELECT renewal.id,account.panel_id,renewal.state,clock.started FROM renewal_requests renewal JOIN accounts account ON account.id=renewal.account JOIN renewal_clock clock ON clock.id=renewal.id WHERE renewal.state IN ('executing','uncertain') ORDER BY clock.started,renewal.id LIMIT 20").all().map(row => ({ ...row, readyAt: row.started + reviewDelayMs }));
+        },
+        recoveryCase(id) {
+            if (!reconciliationEnabled) throw new Error('RECONCILIATION_DISABLED');
+            if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id)) throw new Error('INVALID_RECONCILIATION');
+            const row = database.prepare("SELECT renewal.id,account.panel_id,renewal.state,renewal.proposal,renewal.currency,renewal.units,renewal.days,clock.started FROM renewal_requests renewal JOIN accounts account ON account.id=renewal.account JOIN renewal_clock clock ON clock.id=renewal.id WHERE renewal.id=? AND renewal.state IN ('executing','uncertain')").get(id);
+            if (!row || !unitsValid(row.units) || !currencyValid(row.currency) || !Number.isSafeInteger(row.panel_id) || row.panel_id <= 0 || !Number.isSafeInteger(row.started) || row.started < 0 || !Number.isSafeInteger(row.started + reviewDelayMs) || !/^[A-Za-z0-9_-]{16}$/.test(row.proposal ?? '')) throw new Error('RECONCILIATION_UNAVAILABLE');
+            return { ...row, readyAt: row.started + reviewDelayMs, observedAt: now() };
+        },
+        reconcileRenewal(id, { state, proposal, outcome, note } = {}) {
+            if (!reconciliationEnabled) throw new Error('RECONCILIATION_DISABLED');
+            if (!['executing', 'uncertain'].includes(state) || typeof proposal !== 'string' || !/^[A-Za-z0-9_-]{16}$/.test(proposal) || !['done', 'refunded'].includes(outcome) || typeof note !== 'string' || note.trim().length < 8 || note.length > 200 || /[\u0000-\u001f\u007f]/.test(note) || redactSupport(note) !== note) throw new Error('INVALID_RECONCILIATION');
+            return transact(() => {
+                const row = api.recoveryCase(id);
+                if (row.state !== state || row.proposal !== proposal || now() < row.readyAt) throw new Error('RECONCILIATION_NOT_READY');
+                if (outcome === 'refunded') {
+                    const owner = database.prepare('SELECT account FROM renewal_requests WHERE id=?').get(id).account;
+                    if (!Number.isSafeInteger(balance(owner, row.currency) + row.units)) throw new Error('BALANCE_LIMIT');
+                    database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run('renewal-refund:' + id, owner, row.currency, row.units, now());
+                }
+                const next = outcome === 'done' ? 'done' : 'rejected';
+                const updated = database.prepare('UPDATE renewal_requests SET state=? WHERE id=? AND state=? AND proposal=?').run(next, id, state, proposal);
+                if (updated.changes !== 1) throw new Error('RECONCILIATION_UNAVAILABLE');
+                audit('reconciliation', id, next, note.trim());
+                return { settled: true, outcome };
+            });
         },
         pendingRenewals() { return database.prepare('SELECT renewal.id,account.panel_id,renewal.currency,renewal.units,renewal.days FROM renewal_requests renewal JOIN accounts account ON account.id=renewal.account WHERE renewal.state=? ORDER BY renewal.created LIMIT 20').all('pending'); },
         reserveRenewal(id, proposal) {
@@ -102,6 +144,8 @@ export function createBusinessStore({ filename, now = Date.now }) {
                 if (!row || balance(row.account, row.currency) < row.units) throw new Error('RENEWAL_UNAVAILABLE');
                 database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run('renewal:' + id, row.account, row.currency, -row.units, now());
                 database.prepare('UPDATE renewal_requests SET state=?,proposal=? WHERE id=?').run('executing', proposal, id);
+                database.prepare('INSERT INTO renewal_clock VALUES (?,?)').run(id, now());
+                audit('renewal', id, 'executing');
                 return { reserved: true };
             });
         },
@@ -112,6 +156,7 @@ export function createBusinessStore({ filename, now = Date.now }) {
                 if (!row) throw new Error('RENEWAL_UNAVAILABLE');
                 if (outcome === 'rejected') database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run('renewal-refund:' + id, row.account, row.currency, row.units, now());
                 database.prepare('UPDATE renewal_requests SET state=? WHERE id=?').run(outcome, id);
+                audit('renewal', id, outcome);
                 return { settled: true, outcome };
             });
         },

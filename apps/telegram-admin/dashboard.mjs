@@ -135,6 +135,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 const result = await adminHandle({ text, data, allowedUserId });
                 if (result) return reply(result.text, result.reply_markup);
             }
+            if (/^(?:плат[её]ж|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) return reply('Бизнес-модуль или это действие не включены. Запрос к ИИ не выполнялся.');
             if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return home();
             if (data === 'budget' || text === '/budget') {
                 if (!budgetStatus) return reply('Учёт ИИ недоступен. Кнопки работают без ИИ.');

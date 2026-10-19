@@ -46,7 +46,7 @@ async function main() {
     const api = createTelegramApi({ ...apiOptions, signal: controller.signal });
     const finalApi = createTelegramApi(apiOptions);
     if (extensions.adminRead) administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile, signal: controller.signal }), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields });
-    const userHandler = administration ? createAdminHandler({ administration, actorId: config.allowedUserId }) : undefined;
+    const userHandler = administration ? createAdminHandler({ administration, actorId: config.allowedUserId, renewalDays: extensions.renewalDays }) : undefined;
     const businessHandler = extensions.business ? createBusinessAdmin({ actorId: config.allowedUserId, administration }) : undefined;
     const offsetFile = join(config.stateDirectory, 'offset.json');
     const heartbeatFile = join(config.stateDirectory, 'heartbeat.json');

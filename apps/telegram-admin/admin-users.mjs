@@ -36,8 +36,10 @@ export function createUserAdministration({ filename, client, actorId, readEnable
     let lastRead = -Infinity;
     function authorize(actor) { if (actor !== actorId || !readEnabled) throw new Error('ADMIN_DISABLED'); }
     async function get(ref) {
+        if (!reference(ref)) throw new Error('ADMIN_INVALID_REFERENCE');
         const user = await client.get(ref);
         if (!user || !Number.isSafeInteger(user.id) || user.id <= 0 || typeof user.username !== 'string' || !['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED'].includes(user.status)) throw new Error('ADMIN_UNAVAILABLE');
+        if (numericId(ref) ? user.id !== Number(ref) : user.username !== ref) throw new Error('ADMIN_UNAVAILABLE');
         return user;
     }
     function ticket(user, operation, payload) {
@@ -53,6 +55,12 @@ export function createUserAdministration({ filename, client, actorId, readEnable
         try { return await work(); } finally { busy = false; }
     }
     return {
+        policy(actor) { authorize(actor); return { writeEnabled, fields: [...allowedFields] }; },
+        hasInFlight(actor) { authorize(actor); return busy; },
+        operations(actor) {
+            authorize(actor);
+            return database.prepare('SELECT id,target,operation,state,expires FROM confirmations WHERE actor=? ORDER BY expires DESC,id DESC LIMIT 20').all(actor).map(entry => ({ ...entry, state: entry.state === 'pending' && entry.expires < now() ? 'expired' : entry.state }));
+        },
         async card(actor, ref) {
             authorize(actor);
             return exclusive(async () => {
@@ -138,21 +146,79 @@ export function createUserAdministration({ filename, client, actorId, readEnable
     };
 }
 
-export function createAdminHandler({ administration, actorId }) {
+export function createAdminHandler({ administration, actorId, renewalDays = [1, 7, 30, 90], now = Date.now }) {
+    if (!Number.isSafeInteger(actorId) || actorId <= 0 || !Array.isArray(renewalDays) || !renewalDays.length || renewalDays.length > 8 || new Set(renewalDays).size !== renewalDays.length || renewalDays.some(days => !Number.isInteger(days) || days < 1 || days > 366)) throw new Error('ADMIN_CONFIGURATION_INVALID');
+    let input;
     const escape = value => String(value ?? 'нет данных').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
     const response = (text, rows = [[{ text: '🏠 Меню', callback_data: 'home' }]]) => ({ text, reply_markup: { inline_keyboard: rows } });
     const proposal = ticket => response(`<b>Подтверждение администратора</b>\nПользователь: <code>${escape(ticket.target)}</code>\n${ticket.operation === 'subscription' ? 'Показать секретную ссылку подписки только в этом чате.' : `Изменения: <code>${escape(JSON.stringify(ticket.changes))}</code>`}\nДействует 3 минуты. ИИ не может подтвердить действие.`, [[{ text: '✅ Подтвердить', callback_data: `ac:${ticket.id}` }, { text: 'Отмена', callback_data: `ax:${ticket.id}` }]]);
-    return async ({ text, data, allowedUserId }) => {
+    const policy = () => administration.policy?.(actorId) ?? { writeEnabled: false, fields: [] };
+    const navigation = [[{ text: '🔎 Найти пользователя', callback_data: 'admin_search' }, { text: '🗒 Операции', callback_data: 'admin_operations' }], [{ text: '🏠 Меню', callback_data: 'home' }]];
+    const labels = { status: 'Статус', expireAt: 'Окончание подписки', description: 'Описание', email: 'Почта', telegramId: 'Telegram ID', trafficLimitBytes: 'Лимит трафика в байтах', tag: 'Метка', hwidDeviceLimit: 'Лимит устройств' };
+    const card = async ref => {
+        const user = await administration.card(actorId, ref);
+        const permissions = policy();
+        const rows = [[{ text: '🔗 Подписка', callback_data: `al:${user.id}` }]];
+        if (permissions.writeEnabled && permissions.fields.includes('expireAt')) rows.push([{ text: '⏳ Продлить', callback_data: `ar:${user.id}` }]);
+        if (permissions.writeEnabled && permissions.fields.length) rows.push([{ text: '✏️ Изменить данные', callback_data: `av:${user.id}` }]);
+        if (permissions.writeEnabled && permissions.fields.includes('status')) rows.push([{ text: 'Включить', callback_data: `ae:${user.id}` }, { text: 'Отключить', callback_data: `ad:${user.id}` }]);
+        rows.push([{ text: '🔄 Обновить', callback_data: `au:${user.id}` }, { text: '🔎 Другой пользователь', callback_data: 'admin_search' }], [{ text: '🏠 Меню', callback_data: 'home' }]);
+        return response(`<b>👤 ${escape(user.username)}</b>\nID: <code>${escape(user.id)}</code>\nСтатус: ${escape(user.status)}\nДо: ${escape(user.expireAt)}\nТрафик: ${escape(user.trafficUsedBytes)} / ${escape(user.trafficLimitBytes)} байт\nTelegram: ${user.telegramLinked ? 'привязан' : 'не привязан'}\nОписание: ${escape(user.description)}\nПроверено: ${escape(user.observedAt)}`, rows);
+    };
+    return async ({ text = '', data, allowedUserId }) => {
         if (allowedUserId !== actorId) return null;
+        const priorInput = input;
+        if (data || text.startsWith('/') || /^(?:плат[её]ж|ответ|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) input = undefined;
         const match = text.match(/^(?:(?:покажи|открой|найди)\s+)?(?:пользователь|пользователя|юзер|юзера|user)\s+(?:(?:с\s+)?id\s+|#)?([A-Za-z0-9_-]{1,36})$/i);
         const edit = text.match(/^(?:измени|изменить)\s+([A-Za-z0-9_-]{1,36})\s+([A-Za-z]+)=(.{1,500})$/i);
         const subscription = text.match(/^(?:подписка|ссылка подписки)\s+([A-Za-z0-9_-]{1,36})$/i);
         const pending = text.match(/^заявка\s+([A-Za-z0-9_-]{16})$/);
         const renewal = text.match(/^(?:продли|продлить)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})\s+на\s+(\d{1,3})\s+(?:день|дня|дней)$/i);
         const statusChange = text.match(/^(включи|отключи)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})$/i);
-        if (!match && !edit && !subscription && !pending && !renewal && !statusChange && !/^(?:ac:|ax:|al:|au:|ad:|ae:|admin_home$)/.test(data ?? '') && !/^(?:пользователь|юзер|user|измени|изменить|подписка|ссылка подписки|заявка|продли|продлить|включи|отключи)(?:\s|$)/i.test(text)) return null;
+        if (!input && /^подписка\s+[А-Яа-яЁё]/.test(text)) return null;
+        const interactive = /^(?:admin_home|admin_search|admin_cancel_input|admin_operations|a[rv]:\d{1,16}|ap:\d{1,16}:\d{1,3}|af:\d{1,16}:[A-Za-z]+)$/.test(data ?? '');
+        if (!match && !edit && !subscription && !pending && !renewal && !statusChange && !input && !interactive && !/^(?:ac:|ax:|al:|au:|ad:|ae:)/.test(data ?? '') && !/^(?:пользователь|юзер|user|измени|изменить|подписка|ссылка подписки|заявка|продли|продлить|включи|отключи)(?:\s|$)/i.test(text)) return null;
         try {
-            if (data === 'admin_home') return response('<b>Пользователи</b>\nНапишите «пользователь username» или «подписка username». Для изменения: «измени username description=текст». Доступные поля задаются по SSH; каждое изменение требует отдельного подтверждения.');
+            if (data === 'admin_home') return response('<b>Управление пользователями</b>\nПоиск по точному ID или username, карточка, подписка, продление и разрешённые поля. Чтение не использует ИИ; изменения требуют отдельной кнопки подтверждения.', navigation);
+            if (data === 'admin_search') { input = { kind: 'search', at: now() }; return response('Введите точный числовой ID или username без дополнительных слов. Ввод действует 2 минуты; похожие имена не подбираются.', [[{ text: 'Отмена', callback_data: 'admin_cancel_input' }]]); }
+            if (data === 'admin_cancel_input') return response('Ввод отменён. Панель не изменялась.', navigation);
+            if (data === 'admin_operations') {
+                const entries = administration.operations?.(actorId) ?? [];
+                return response('<b>Последние сохранённые операции</b>\n' + (entries.length ? entries.map(entry => `#${escape(entry.target)} · ${escape(entry.operation)} · ${escape(entry.state)}\n<code>${escape(entry.id)}</code>`).join('\n\n') : 'Операций пока нет.') + '\n\nexecuting / uncertain требуют проверки, а не повторной отправки. Полезная нагрузка и секретные ссылки не показываются.', navigation);
+            }
+            const renewPreset = data?.match(/^ap:(\d{1,16}):(\d{1,3})$/);
+            if (renewPreset) {
+                if (!renewalDays.includes(Number(renewPreset[2]))) throw new Error('ADMIN_INVALID_CHANGE');
+                return proposal(await administration.prepareRenewal(actorId, renewPreset[1], Number(renewPreset[2])));
+            }
+            const renewMenu = data?.match(/^ar:(\d{1,16})$/);
+            if (renewMenu) {
+                if (!policy().writeEnabled || !policy().fields.includes('expireAt')) throw new Error('ADMIN_WRITE_DISABLED');
+                return response('На сколько дней продлить? После выбора будет только предпросмотр, без изменения панели.', [...renewalDays.map(days => [{ text: `+${days} дн.`, callback_data: `ap:${renewMenu[1]}:${days}` }]), [{ text: 'К карточке', callback_data: `au:${renewMenu[1]}` }]]);
+            }
+            const fieldsMenu = data?.match(/^av:(\d{1,16})$/);
+            if (fieldsMenu) {
+                if (!policy().writeEnabled) throw new Error('ADMIN_WRITE_DISABLED');
+                return response('Выберите разрешённое поле. Значение будет проверено по контракту панели, затем потребуется подтверждение.', [...policy().fields.map(field => [{ text: labels[field], callback_data: `af:${fieldsMenu[1]}:${field}` }]), [{ text: 'К карточке', callback_data: `au:${fieldsMenu[1]}` }]]);
+            }
+            const fieldInput = data?.match(/^af:(\d{1,16}):([A-Za-z]+)$/);
+            if (fieldInput) {
+                if (!policy().writeEnabled || !policy().fields.includes(fieldInput[2])) throw new Error('ADMIN_FIELD_DISABLED');
+                input = { kind: 'field', target: fieldInput[1], field: fieldInput[2], at: now() };
+                return response(`Введите новое значение: ${escape(labels[fieldInput[2]])}.\nДля статуса: ACTIVE или DISABLED; для даты — ISO8601 с часовым поясом; числовые лимиты — целым числом. Ввод действует 2 минуты.`, [[{ text: 'Отмена', callback_data: 'admin_cancel_input' }]]);
+            }
+            if (!data && input && !match && !edit && !subscription && !pending && !renewal && !statusChange) {
+                const value = input; input = undefined;
+                if (now() < value.at || now() - value.at >= 120000) return response('Время ввода истекло. Откройте действие заново.', navigation);
+                if (value.kind === 'search') {
+                    if (!reference(text.trim())) return response('Нужен точный ID или username; панель и ИИ не запрашивались.', navigation);
+                    return await card(text.trim());
+                }
+                if (!text.length || text.length > 500) throw new Error('ADMIN_INVALID_CHANGE');
+                const converted = ['trafficLimitBytes', 'hwidDeviceLimit', 'telegramId'].includes(value.field) ? Number(text) : text;
+                return proposal(await administration.prepare(actorId, value.target, { [value.field]: converted }));
+            }
+            if (priorInput && (match || edit || subscription || pending || renewal || statusChange)) input = undefined;
             if (pending) return proposal(administration.preview(actorId, pending[1]));
             if (renewal) return proposal(await administration.prepareRenewal(actorId, renewal[1], Number(renewal[2])));
             if (statusChange) return proposal(await administration.prepare(actorId, statusChange[2], { status: statusChange[1].toLowerCase() === 'включи' ? 'ACTIVE' : 'DISABLED' }));
@@ -168,8 +234,7 @@ export function createAdminHandler({ administration, actorId }) {
                 return proposal(await administration.prepare(actorId, edit[1], { [field]: value }));
             }
             if (/^a[de]:/.test(data ?? '')) return proposal(await administration.prepare(actorId, data.slice(3), { status: data.startsWith('ae:') ? 'ACTIVE' : 'DISABLED' }));
-            const user = await administration.card(actorId, match?.[1] ?? data?.slice(3));
-            return response(`<b>👤 ${escape(user.username)}</b>\nID: <code>${escape(user.id)}</code>\nСтатус: ${escape(user.status)}\nДо: ${escape(user.expireAt)}\nТрафик: ${escape(user.trafficUsedBytes)} / ${escape(user.trafficLimitBytes)} байт\nTelegram: ${user.telegramLinked ? 'привязан' : 'не привязан'}\nОписание: ${escape(user.description)}\nПроверено: ${escape(user.observedAt)}`, [[{ text: '🔗 Подписка', callback_data: `al:${user.id}` }], [{ text: 'Включить', callback_data: `ae:${user.id}` }, { text: 'Отключить', callback_data: `ad:${user.id}` }], [{ text: '🔄 Обновить', callback_data: `au:${user.id}` }, { text: '🏠 Меню', callback_data: 'home' }]]);
+            return await card(match?.[1] ?? data?.slice(3));
         } catch (error) {
             const messages = { ADMIN_WRITE_DISABLED: 'Изменения выключены. Нужны отдельный write-токен и явное включение по SSH.', ADMIN_DISABLED: 'Карточки пользователей выключены в настройках.', ADMIN_STALE: 'Данные изменились после предпросмотра. Создайте новое подтверждение.', ADMIN_CONFIRMATION_EXPIRED: 'Подтверждение использовано или устарело.', ADMIN_BUSY: 'Подождите две секунды и повторите.', ADMIN_FIELD_DISABLED: 'Это поле не разрешено в локальной политике.' };
             return response(messages[error?.message] ?? 'Операция недоступна. При сетевой ошибке изменения не повторяются: сначала проверьте карточку. Формат: «пользователь username»; «измени username description=текст».');

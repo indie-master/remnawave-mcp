@@ -30,6 +30,15 @@ test('portal login/CSRF/Host/account isolation and payment workflow use only syn
         const payment = await (await call('/api/payments', { currency: 'RUB', amount: '123.45' }, headers)).json();
         assert.equal(store.account(first).balances.RUB, 0); store.approvePayment(payment.id, 'test:receipt1'); assert.equal(store.account(first).balances.RUB, 12345);
         assert.equal(store.account(second).balances.RUB, 0);
+        const renewal = store.requestRenewal(first, 'RUB', { units: 1000, days: 30 });
+        const accountResponse = await (await call('/api/account', undefined, headers)).json();
+        assert.equal(accountResponse.renewals[0].id, renewal.id);
+        assert.equal(accountResponse.renewals[0].state, 'pending');
+        assert.ok(!JSON.stringify(accountResponse.renewals).includes('proposal'));
+        const otherLogin = await call('/api/login', { email: 'second@example.invalid', password: 'synthetic-password-only' });
+        const otherCookie = otherLogin.headers.get('set-cookie').split(';')[0];
+        assert.deepEqual((await (await call('/api/account', undefined, { Cookie: otherCookie })).json()).renewals, []);
+        assert.equal((await call('/recovery/' + renewal.id, undefined, headers)).status, 404);
         assert.equal((await call('/api/payments', { currency: 'RUB', amount: '1', account: second }, headers)).status, 400);
         assert.equal((await call('/api/subscription', undefined, headers)).status, 200);
         assert.equal((await call('/api/account', undefined, { ...headers, Host: 'attacker.invalid' })).status, 400);

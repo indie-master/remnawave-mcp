@@ -54,7 +54,7 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
             const token = request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
             const session = store.session(token);
             if (request.method === 'POST' && request.headers['x-csrf-token'] !== session.csrf) throw new Error('REQUEST_REJECTED');
-            if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), history: store.history(session.account), features: { media: !!analyzeMedia, billing: billingEnabled } }); return; }
+            if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), renewals: store.renewals(session.account), history: store.history(session.account), features: { media: !!analyzeMedia, billing: billingEnabled } }); return; }
             if (request.method === 'GET' && request.url === '/api/guides') { send(200, guides?.list() ?? []); return; }
             if (request.method === 'GET' && /^\/api\/guides\/[a-z0-9_-]{1,40}$/.test(request.url) && guides) {
                 const image = guides.image(request.url.split('/').at(-1)); response.writeHead(200, { 'Content-Type': image.type }).end(image.bytes); return;
