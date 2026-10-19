@@ -124,7 +124,7 @@ export class Privacy {
         if (this.mode === 'off' || value === null || value === undefined) return value;
         const strict = this.mode === 'strict';
 
-        if (key && SECRET_KEY_RE.test(key) && (typeof value === 'string' || typeof value === 'number')) {
+        if (key && SECRET_KEY_RE.test(key)) {
             return value === '' ? value : MASK;
         }
         if (key === 'auth' && typeof value === 'string' && value !== '' && !AUTH_MODES.has(value)) return MASK;
@@ -143,8 +143,16 @@ export class Privacy {
             if (inUser && key in USER_ONLY_PSEUDO && typeof value === 'string')
                 return this.pseudo(USER_ONLY_PSEUDO[key], value);
         }
-        if (typeof value === 'string')
+        if (typeof value === 'string') {
+            if (/^\s*[\[{]/.test(value)) {
+                try {
+                    return JSON.stringify(this.apply(JSON.parse(value), '', inUser));
+                } catch {
+                    if (value.trimStart().startsWith('{')) return MASK;
+                }
+            }
             return value.replace(LINK_RE, (_m, p: string) => `${p}://${MASK}`).replace(URL_CRED_RE, `$1${MASK}@`);
+        }
         if (Array.isArray(value)) return value.map((v) => this.apply(v, '', inUser));
         if (typeof value === 'object') {
             const obj = value as Record<string, unknown>;

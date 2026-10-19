@@ -1,0 +1,4 @@
+services:
+  ai:
+    environment:
+      AI_DAILY_LIMIT: ${AI_DAILY_LIMIT:-100}

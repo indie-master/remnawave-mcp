@@ -1,0 +1,9 @@
+FROM python:3.12-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-rus ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir Pillow==12.3.0
+RUN useradd --uid 1000 --create-home worker && mkdir /media-bridge && chown worker:worker /media-bridge
+COPY apps/business/media-worker.py /app/media-worker.py
+RUN chmod 0755 /app && chmod 0444 /app/media-worker.py
+ENV OMP_THREAD_LIMIT=1 OPENBLAS_NUM_THREADS=1
+USER worker
+CMD ["python", "/app/media-worker.py"]

@@ -1,6 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../dist/config.js';
+import { fileURLToPath } from 'node:url';
+
+test('token can be read from a mounted secret file', () => {
+    const filename = fileURLToPath(new URL('./fixtures/api-token.txt', import.meta.url));
+    const config = withEnv({ REMNAWAVE_BASE_URL: 'https://panel.example.invalid', REMNAWAVE_API_TOKEN_FILE: filename }, loadConfig);
+    assert.equal(config.headers.Authorization, 'Bearer DEMO_TOKEN_FOR_TESTS');
+});
+
+test('ambiguous and unreadable secret sources fail closed', () => {
+    const base = { REMNAWAVE_BASE_URL: 'https://panel.example.invalid', REMNAWAVE_API_TOKEN_FILE: 'missing-file' };
+    assert.throws(() => withEnv(base, loadConfig), /Cannot read REMNAWAVE_API_TOKEN_FILE/);
+    assert.throws(() => withEnv({ ...base, REMNAWAVE_API_TOKEN: 'demo' }, loadConfig), /not both/);
+});
+
+test('base URL refuses credentials, query, fragments and unsupported protocols', () => {
+    for (const address of ['https://user:pass@panel.example.invalid', 'https://panel.example.invalid?token=demo', 'https://panel.example.invalid#demo', 'file:///tmp/panel', 'invalid']) {
+        assert.throws(() => withEnv({ REMNAWAVE_BASE_URL: address, REMNAWAVE_API_TOKEN: 'demo' }, loadConfig), /REMNAWAVE_BASE_URL/);
+    }
+});
 
 function withEnv(env, fn) {
     const saved = { ...process.env };

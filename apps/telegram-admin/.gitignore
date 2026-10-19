@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+secrets/
+state/
+*.local.json
+*.log
+*.sqlite*
+receiver-safety.json
+classifier-paused
+auth.json
+.codex/
+.ops/

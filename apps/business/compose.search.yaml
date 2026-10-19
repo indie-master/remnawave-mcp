@@ -1,0 +1,6 @@
+services:
+  portal:
+    secrets: [search_api_token]
+secrets:
+  search_api_token:
+    file: ./secrets/search-api-token.txt
