@@ -13,6 +13,7 @@ COPY --from=build /build/dist/client.js ./dist/client.js
 COPY --from=build /build/node_modules ./node_modules
 COPY apps/telegram-admin/admin-users.mjs ./apps/telegram-admin/
 COPY apps/business/config.mjs ./apps/business/
+COPY apps/business/billing-admin.mjs ./apps/business/
 COPY apps/business/store.mjs apps/business/portal.mjs apps/business/portal.html apps/business/faq.json apps/business/start.mjs ./apps/business/
 COPY apps/business/account-cli.mjs ./apps/business/
 COPY apps/business/reference-search.mjs ./apps/business/
