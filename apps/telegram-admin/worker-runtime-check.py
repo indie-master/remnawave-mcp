@@ -1,4 +1,5 @@
 import http.client
+from importlib.metadata import version
 import json
 import os
 import socket
@@ -49,6 +50,7 @@ def check_worker(kind):
             connection.close()
 
     if kind == 'voice':
+        assert version('av') == '17.1.0'
         with tempfile.TemporaryDirectory() as directory:
             audio_path = os.path.join(directory, 'synthetic-silence.wav')
             with wave.open(audio_path, 'wb') as audio:
@@ -67,7 +69,7 @@ def check_worker(kind):
             assert len(wrapped.stdout) <= 4096
             assert json.loads(wrapped.stdout).get('confident') is False
 
-    print(json.dumps({'worker': kind, 'uid': os.getuid(), 'directoryMode': '0755', 'sourceMode': '0444', 'unixEndpoint': True, 'syntheticDecode': kind == 'voice', 'network': False}))
+    print(json.dumps({'worker': kind, 'uid': os.getuid(), 'directoryMode': '0755', 'sourceMode': '0444', 'unixEndpoint': True, 'syntheticDecode': kind == 'voice', 'decoderVersion': version('av') if kind == 'voice' else None, 'network': False}))
 
 
 if __name__ == '__main__':
