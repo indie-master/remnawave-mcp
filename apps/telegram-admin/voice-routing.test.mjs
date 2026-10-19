@@ -5,10 +5,47 @@ import { createBudgetedIntent } from './budgeted-intent.mjs';
 import { createIntentStore } from './intent-store.mjs';
 import { createVoiceInput } from './voice-client.mjs';
 import { createMenuSession } from './menu-session.mjs';
+import { resolveLocalRequest } from './local-router.mjs';
 
 const actor = 123456789;
 const start = Date.parse('2026-10-19T09:00:00Z');
 const question = 'синтетический голосовой вопрос';
+
+test('spoken punctuation preserves exact local meanings and does not discard filters, negations or writes', () => {
+    for (const phrase of ['Пришли, статистику.', 'Пришли, пожалуйста, статистику.']) assert.equal(resolveLocalRequest(phrase).intent.action, 'stats', phrase);
+    assert.equal(resolveLocalRequest('Пришли, пожалуйста, статистику нод.').intent.action, 'nodes');
+    for (const phrase of [',', 'статистика, ноды, пользователи', 'статистика, не нод', 'не, статистику', 'статистика, за месяц', 'подписки, за 3,5 дня']) assert.equal(resolveLocalRequest(phrase).kind, 'clarify', phrase);
+    assert.equal(resolveLocalRequest('удали, пользователя').kind, 'blocked');
+});
+
+for (const enhancedUi of [true, false]) test(`ambiguous voice displays its escaped local transcript without AI, enhanced UI ${enhancedUi}`, async () => {
+    const state = fixture({ enhancedUi });
+    try {
+        const text = 'статистика нод за месяц <b>пример</b>';
+        const answer = await state.handle(state.message(text));
+        assert.match(answer.text, /Распознано локально/);
+        assert.match(answer.text, /статистика нод за месяц &lt;b&gt;пример&lt;\/b&gt;/);
+        assert.match(answer.text, /Уточните раздел/);
+        assert.ok(!answer.reply_markup.inline_keyboard.flat().some(button => button.callback_data.startsWith('voice_ai:')));
+        assert.deepEqual(state.counts(), { modelCalls: 0, readinessCalls: 0, reads: 0 });
+        assert.equal(state.store.status().used, 0);
+        assert.ok(!JSON.stringify(state.events).includes(text));
+        const typed = await state.handle(state.message(text, false));
+        assert.doesNotMatch(typed.text, /Распознано локально/);
+    } finally { state.store.close(); }
+});
+
+test('voice period clarification displays the transcript and keeps period selection buttons', async () => {
+    const state = fixture();
+    try {
+        const answer = await state.handle(state.message('подписки до завтра'));
+        assert.match(answer.text, /Распознано локально/);
+        assert.match(answer.text, /подписки до завтра/);
+        assert.match(answer.text, /Выберите поддерживаемый период/);
+        assert.ok(answer.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'q:expiring:3'));
+        assert.deepEqual(state.counts(), { modelCalls: 0, readinessCalls: 0, reads: 0 });
+    } finally { state.store.close(); }
+});
 
 function fixture({ enhancedUi = true, dailyLimit = 100, fail = false } = {}) {
     let clock = start;

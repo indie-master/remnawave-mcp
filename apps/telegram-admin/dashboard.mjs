@@ -33,13 +33,14 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     let context;
     const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
     const home = () => reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (textModeDescription ?? (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.')) + '\nУведомления: только черновики администратору.', keyboard([...(enhancedUi ? extendedMenu : menu).inline_keyboard, ...extraButtons]));
-    function clarification(topic) {
+    function clarification(topic, recognizedText) {
         const rows = topic === 'period'
             ? [[1, 3, 7].map(days => button(`${days} дн.`, `q:expiring:${days}`)), [14, 30].map(days => button(`${days} дн.`, `q:expiring:${days}`))]
             : topic === 'squads'
                 ? [[button('Внутренние', 'q:internal_squads'), button('Внешние', 'q:external_squads')]]
                 : [[button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')], [button('📊 Общая статистика', 'q:stats'), button('🖥 Ноды', 'q:nodes')], [button('⏳ Подписки', 'periods')]];
-        return reply(topic === 'period' ? 'Выберите поддерживаемый период: только активные подписки, истекающие от текущего момента. Даты и другие фильтры автоматически не подменяются.' : 'Уточните раздел. Запрос к ИИ не выполнялся; дополнительные фильтры не применены.', keyboard([...rows, [button('🏠 Меню', 'home')]]));
+        const caption = recognizedText ? `<b>🎙 Распознано локально:</b>\n${escapeHtml(recognizedText)}\n\n` : '';
+        return reply(caption + (topic === 'period' ? 'Выберите поддерживаемый период: только активные подписки, истекающие от текущего момента. Даты и другие фильтры автоматически не подменяются.' : 'Уточните раздел. Запрос к ИИ не выполнялся; дополнительные фильтры не применены.'), keyboard([...rows, [button('🏠 Меню', 'home')]]));
     }
     function nodePage(key, page = 0) {
         const report = snapshot(key);
@@ -184,7 +185,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             if (!intent && enhancedUi) {
                 const validContext = context && now() >= context.savedAt && now() - context.savedAt < 600000 ? context.intent : undefined;
                 const local = resolveLocalRequest(text, { context: validContext });
-                if (local?.kind === 'clarify') return clarification(local.topic);
+                if (local?.kind === 'clarify') return clarification(local.topic, !callback && update.inputSource === 'local-voice' ? text : undefined);
                 if (local?.kind === 'blocked') return reply('Изменения панели и отправка клиентам недоступны. Используйте проверки чтения. ИИ не вызывался.');
                 if (local?.kind === 'intent') {
                     intent = local.intent;
@@ -233,7 +234,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             } finally { busy = false; }
         } catch (error) {
             if (error?.message === 'REPORT_DISABLED') return reply('Этот отчёт отключён в локальных разрешениях бота. API панели не запрашивался; изменить список может администратор через SSH. Права самого токена панели не менялись.');
-            if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification('scope');
+            if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification('scope', !callback && update.inputSource === 'local-voice' ? message.text.trim() : undefined);
             if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
             if (error?.message === 'AI_BRIDGE_UNAVAILABLE') return reply('ИИ-модуль сейчас недоступен. Проверка готовности не расходует попытку. Используйте кнопки или знакомые вопросы.');
             if (error?.message === 'AI_UNAVAILABLE') return reply('ИИ временно недоступен или не смог безопасно распознать вопрос. Попытка учтена, автоматического повтора нет. Используйте кнопки или знакомые вопросы.');
