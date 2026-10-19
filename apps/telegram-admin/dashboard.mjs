@@ -40,7 +40,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 ? [[button('Внутренние', 'q:internal_squads'), button('Внешние', 'q:external_squads')]]
                 : [[button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')], [button('📊 Общая статистика', 'q:stats'), button('🖥 Ноды', 'q:nodes')], [button('⏳ Подписки', 'periods')]];
         const caption = recognizedText ? `<b>🎙 Распознано локально:</b>\n${escapeHtml(recognizedText)}\n\n` : '';
-        return reply(caption + (topic === 'period' ? 'Выберите поддерживаемый период: только активные подписки, истекающие от текущего момента. Даты и другие фильтры автоматически не подменяются.' : 'Уточните раздел. Запрос к ИИ не выполнялся; дополнительные фильтры не применены.'), keyboard([...rows, [button('🏠 Меню', 'home')]]));
+        return reply(caption + (topic === 'period' ? 'Выберите поддерживаемый период: только активные подписки, истекающие от текущего момента. «Через N дней» не означает автоматически «в ближайшие N дней». Даты и другие фильтры автоматически не подменяются. ИИ не вызывался.' : 'Уточните раздел. Запрос к ИИ не выполнялся; дополнительные фильтры не применены.'), keyboard([...rows, [button('🏠 Меню', 'home')]]));
     }
     function nodePage(key, page = 0) {
         const report = snapshot(key);
@@ -234,7 +234,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             } finally { busy = false; }
         } catch (error) {
             if (error?.message === 'REPORT_DISABLED') return reply('Этот отчёт отключён в локальных разрешениях бота. API панели не запрашивался; изменить список может администратор через SSH. Права самого токена панели не менялись.');
-            if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification('scope', !callback && update.inputSource === 'local-voice' ? message.text.trim() : undefined);
+            if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification(['period', 'squads'].includes(error.topic) ? error.topic : 'scope', !callback && update.inputSource === 'local-voice' ? message.text.trim() : undefined);
             if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
             if (error?.message === 'AI_BRIDGE_UNAVAILABLE') return reply('ИИ-модуль сейчас недоступен. Проверка готовности не расходует попытку. Используйте кнопки или знакомые вопросы.');
             if (error?.message === 'AI_UNAVAILABLE') return reply('ИИ временно недоступен или не смог безопасно распознать вопрос. Попытка учтена, автоматического повтора нет. Используйте кнопки или знакомые вопросы.');

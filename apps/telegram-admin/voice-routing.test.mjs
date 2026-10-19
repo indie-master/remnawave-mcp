@@ -11,6 +11,61 @@ const actor = 123456789;
 const start = Date.parse('2026-10-19T09:00:00Z');
 const question = 'синтетический голосовой вопрос';
 
+test('natural subscription expiry word order and inflection preserve bounded future windows', () => {
+    for (const [phrase, days] of [
+        ['Подписка истекает в ближайшие три дня.', 3],
+        ['Подписка заканчивается в ближайшую неделю.', 7],
+        ['Подписки истекают в течение месяца.', 30],
+        ['Подписки заканчиваются в ближайший день.', 1],
+        ['Истекает подписка в ближайшие 14 дней.', 14],
+        ['Заканчиваются подписки в ближайшие три дня.', 3],
+        ['У кого подписка заканчивается в ближайшие три дня?', 3],
+        ['У кого заканчивается подписка в ближайшую неделю?', 7],
+        ['У кого подписки заканчиваются в ближайшие три дня?', 3],
+        ['У кого скоро заканчивается подписка?', 3],
+        ['Подписки истекают в течение трёх дней.', 3],
+        ['Подписки заканчиваются в течение двух недель.', 14],
+        ['Подписки истекают в течение семи дней.', 7],
+        ['Подписки истекают в течение четырнадцати дней.', 14],
+        ['Подписки истекают в течение тридцати дней.', 30],
+    ]) assert.deepEqual(resolveLocalRequest(phrase).intent, { action: 'expiring', days }, phrase);
+});
+
+test('exact offsets, unsupported windows and malformed expiry speech need period clarification, not AI or guessed filters', () => {
+    for (const phrase of ['Подписка истекает через три дня.', 'подписки заканчиваются через неделю', 'подписка стекает через три дня', 'подписка стеает через три дня', 'подписки неразборчиво в ближайшую неделю', 'подписка заканчивается до 21 октября', 'подписка истекает в ближайшие два дня', 'подписки истекают в ближайшие 21 день', 'подписка истекает', 'подписки заканчиваются']) assert.deepEqual(resolveLocalRequest(phrase), { kind: 'clarify', topic: 'period' }, phrase);
+    for (const phrase of ['не показывай подписки истекающие в ближайшие три дня', 'подписки и ноды', 'подписки пользователя 42 в ближайшие три дня', 'подписки истекли за три дня', 'подписка стекает через три дня на ноде 42']) assert.equal(resolveLocalRequest(phrase).kind, 'clarify', phrase);
+    assert.equal(resolveLocalRequest('продли подписку через три дня').kind, 'blocked');
+});
+
+for (const enhancedUi of [true, false]) test(`malformed expiry voice offers free period buttons and keeps its transcript, enhanced UI ${enhancedUi}`, async () => {
+    const state = fixture({ enhancedUi });
+    try {
+        const text = 'Подписка стекает через три дня.';
+        state.store.put(text, { action: 'stats', days: 3 });
+        const answer = await state.handle(state.message(text));
+        assert.match(answer.text, /Подписка стекает через три дня/);
+        assert.match(answer.text, /Выберите поддерживаемый период/);
+        assert.match(answer.text, /«Через N дней» не означает автоматически/);
+        assert.ok(answer.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'q:expiring:3'));
+        assert.deepEqual(state.counts(), { modelCalls: 0, readinessCalls: 0, reads: 0 });
+        assert.equal(state.store.status().used, 0);
+        const selected = await state.handle(state.callback('q:expiring:3'));
+        assert.match(selected.text, /Подписки: ближайшие 3 дн/);
+        assert.deepEqual(state.counts(), { modelCalls: 0, readinessCalls: 0, reads: 1 });
+        assert.equal(state.store.status().used, 0);
+    } finally { state.store.close(); }
+});
+
+for (const enhancedUi of [true, false]) test(`unambiguous expiry voice reads the three-day report without a model, enhanced UI ${enhancedUi}`, async () => {
+    const state = fixture({ enhancedUi });
+    try {
+        const answer = await state.handle(state.message('Подписка истекает в ближайшие три дня.'));
+        assert.match(answer.text, /Подписки: ближайшие 3 дн/);
+        assert.deepEqual(state.counts(), { modelCalls: 0, readinessCalls: 0, reads: 1 });
+        assert.equal(state.store.status().used, 0);
+    } finally { state.store.close(); }
+});
+
 test('a single extra preposition after a read request preserves the exact report subject', () => {
     for (const [phrase, action] of [
         ['пришли в статистику.', 'stats'],
@@ -75,8 +130,12 @@ function fixture({ enhancedUi = true, dailyLimit = 100, fail = false } = {}) {
         return { action: 'stats', days: 3 };
     }, { checkReady: async () => { readinessCalls++; } });
     const classify = createBudgetedIntent({ store, classify: model, onEvent: event => events.push(event) });
-    const report = async () => { reads++; return { totalUsers: 12, usersOnline: 3, observedAt: new Date(clock).toISOString() }; };
-    const handle = createDashboard({ allowedUserId: actor, enhancedUi, classify, mcpRead: report, service: { stats: report }, now: () => clock, onDiagnostic: event => events.push(event) });
+    const report = async (action, days) => {
+        reads++;
+        const observedAt = new Date(clock).toISOString();
+        return action === 'expiring' ? { days, count: 0, users: [], complete: true, scanned: 0, total: 0, observedAt } : { totalUsers: 12, usersOnline: 3, observedAt };
+    };
+    const handle = createDashboard({ allowedUserId: actor, enhancedUi, classify, mcpRead: report, service: { stats: report, expiring: options => report('expiring', options.days) }, now: () => clock, onDiagnostic: event => events.push(event) });
     const message = (text, voice = true) => ({ update_id: ++sequence, ...(voice ? { inputSource: 'local-voice' } : {}), message: { date: clock / 1000, text, from: { id: actor, is_bot: false }, chat: { id: actor, type: 'private' } } });
     const callback = data => ({ update_id: ++sequence, callback_query: { id: 'synthetic_callback', data, from: { id: actor, is_bot: false }, message: { message_id: 1, chat: { id: actor, type: 'private' } } } });
     return { handle, classify, store, events, message, callback, advance: milliseconds => { clock += milliseconds; }, counts: () => ({ modelCalls, readinessCalls, reads }), now: () => clock };

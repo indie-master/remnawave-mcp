@@ -11,7 +11,8 @@ export function createBudgetedIntent({ store, classify, onEvent = () => {} }) {
     let busy = false;
     const resolveKnown = text => {
         const normalized = normalizeQuestion(text);
-        if (resolveLocalRequest(normalized)?.kind === 'clarify') throw new Error('LOCAL_CLARIFICATION_REQUIRED');
+        const localRequest = resolveLocalRequest(normalized);
+        if (localRequest?.kind === 'clarify') throw Object.assign(new Error('LOCAL_CLARIFICATION_REQUIRED'), { topic: localRequest.topic });
         const local = localIntent(normalized);
         if (local) { store.put(normalized, local); onEvent({ event: 'intent', source: 'local', ok: true }); return local; }
         const cached = store.get(normalized);
