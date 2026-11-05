@@ -9,6 +9,11 @@ const numericId = value => /^\d{1,16}$/.test(String(value)) && Number.isSafeInte
 const reference = value => typeof value === 'string' && (numericId(value) || /^[A-Za-z0-9_-]{3,36}$/.test(value));
 const digest = user => createHash('sha256').update(JSON.stringify([user.id, ...editableFields.map(field => user[field] ?? null)])).digest('hex');
 
+function parseUserPatch(body) {
+    try { return UpdateUserCommand.RequestBodySchema.parse(body); }
+    catch { throw new Error('ADMIN_INVALID_CHANGE'); }
+}
+
 export function createUserClient({ baseUrl, readTokenFile, writeTokenFile = '/run/secrets/panel_write_token', signal }) {
     const origin = new URL(baseUrl);
     if (origin.protocol !== 'https:' || origin.pathname !== '/' || origin.username || origin.password || origin.search || origin.hash) throw new Error('ADMIN_CONFIGURATION_INVALID');
@@ -24,7 +29,7 @@ export function createUserClient({ baseUrl, readTokenFile, writeTokenFile = '/ru
             const command = numericId(ref) ? GetUserByIdCommand : GetUserByUsernameCommand;
             return client(readTokenFile).request('GET', command.url(numericId(ref) ? Number(ref) : ref));
         },
-        async patch(body) { return client(writeTokenFile).request('PATCH', UpdateUserCommand.url, undefined, UpdateUserCommand.RequestBodySchema.parse(body)); },
+        async patch(body) { return client(writeTokenFile).request('PATCH', UpdateUserCommand.url, undefined, parseUserPatch(body)); },
     };
 }
 
@@ -75,7 +80,7 @@ export function createUserAdministration({ filename, client, actorId, readEnable
             if (changes.status !== undefined && !['ACTIVE', 'DISABLED'].includes(changes.status)) throw new Error('ADMIN_INVALID_CHANGE');
             return exclusive(async () => {
                 const user = await get(ref);
-                const body = UpdateUserCommand.RequestBodySchema.parse({ id: user.id, ...changes });
+                const body = parseUserPatch({ id: user.id, ...changes });
                 const validated = Object.fromEntries(Object.keys(changes).map(field => [field, body[field]]));
                 if (JSON.stringify(validated).length > 2048) throw new Error('ADMIN_INVALID_CHANGE');
                 return ticket(user, 'patch', validated);
@@ -94,7 +99,7 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                 const previous = Date.parse(user.expireAt);
                 if (!Number.isFinite(previous)) throw new Error('ADMIN_UNAVAILABLE');
                 const expireAt = new Date(Math.max(now(), previous) + days * 86400000).toISOString();
-                UpdateUserCommand.RequestBodySchema.parse({ id: user.id, expireAt });
+                parseUserPatch({ id: user.id, expireAt });
                 return ticket(user, 'patch', { expireAt });
             });
         },
@@ -133,8 +138,10 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                 }
                 const changes = JSON.parse(entry.payload);
                 if (Object.keys(changes).some(field => !allowedFields.includes(field))) throw new Error('ADMIN_FIELD_DISABLED');
+                const body = { id: user.id, ...changes };
+                parseUserPatch(body);
                 state = 'uncertain';
-                await client.patch(UpdateUserCommand.RequestBodySchema.parse({ id: user.id, ...changes }));
+                await client.patch(body);
                 state = 'done'; return { changed: true };
             } finally {
                 database.prepare('UPDATE confirmations SET state = ?, payload = ? WHERE id = ?').run(state, '{}', id);
@@ -239,7 +246,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
             if (/^a[de]:/.test(data ?? '')) return proposal(await administration.prepare(actorId, data.slice(3), { status: data.startsWith('ae:') ? 'ACTIVE' : 'DISABLED' }));
             return await card(match?.[1] ?? data?.slice(3));
         } catch (error) {
-            const messages = { ADMIN_WRITE_DISABLED: 'Изменения выключены. Нужны отдельный write-токен и явное включение по SSH.', ADMIN_DISABLED: 'Карточки пользователей выключены в настройках.', ADMIN_STALE: 'Данные изменились после предпросмотра. Создайте новое подтверждение.', ADMIN_CONFIRMATION_EXPIRED: 'Подтверждение использовано или устарело.', ADMIN_BUSY: 'Подождите две секунды и повторите.', ADMIN_FIELD_DISABLED: 'Это поле не разрешено в локальной политике.' };
+            const messages = { ADMIN_WRITE_DISABLED: 'Изменения выключены. Нужны отдельный write-токен и явное включение по SSH.', ADMIN_DISABLED: 'Карточки пользователей выключены в настройках.', ADMIN_STALE: 'Данные изменились после предпросмотра. Создайте новое подтверждение.', ADMIN_CONFIRMATION_EXPIRED: 'Подтверждение использовано или устарело.', ADMIN_BUSY: 'Подождите две секунды и повторите.', ADMIN_FIELD_DISABLED: 'Это поле не разрешено в локальной политике.', ADMIN_INVALID_CHANGE: 'Значение некорректно или дата уже прошла. Запрос изменения к панели не отправлялся.' };
             return response(messages[error?.message] ?? 'Операция недоступна. При сетевой ошибке изменения не повторяются: сначала проверьте карточку. Формат: «пользователь username»; «измени username description=текст».');
         }
     };
