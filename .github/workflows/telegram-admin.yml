@@ -1,0 +1,259 @@
+name: Telegram admin bot
+on:
+  push:
+    paths:
+      - apps/telegram-admin/**
+      - apps/telegram-client/**
+      - apps/business/**
+      - src/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/telegram-admin.yml
+  pull_request:
+    paths:
+      - apps/telegram-admin/**
+      - apps/telegram-client/**
+      - apps/business/**
+      - src/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/telegram-admin.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: npm run test:bot
+      - run: node --test "apps/business/*.test.mjs"
+      - run: python3 -c "import ast; ast.parse(open('apps/telegram-admin/voice-worker.py', encoding='utf-8').read())"
+      - run: python3 -c "import ast; ast.parse(open('apps/business/media-worker.py', encoding='utf-8').read())"
+      - run: python3 -c "import ast; ast.parse(open('apps/telegram-admin/worker-runtime-check.py', encoding='utf-8').read())"
+      - run: bash -n apps/telegram-admin/configure.sh
+      - run: bash -n apps/telegram-admin/botctl && bash -n apps/telegram-admin/ops-host.sh
+      - name: Synthetic host CLI and hidden-input terminal tests, without Docker or network access
+        run: sudo env "PATH=$PATH" "$(command -v node)" --test apps/telegram-admin/ops-host.test.mjs
+      - name: Validate Compose using synthetic configuration only
+        env:
+          REMNAWAVE_BASE_URL: https://panel.example.invalid
+          BOT_USERNAME: example_admin_bot
+          TELEGRAM_ADMIN_ID: '123456789'
+        run: |
+          docker compose -f apps/telegram-admin/compose.yaml config --quiet
+          docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml config --quiet
+          docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml -f apps/telegram-admin/compose.features.yaml config --quiet
+          AI_DAILY_LIMIT=10 PANEL_ALLOWED_REPORTS=stats,nodes docker compose -f apps/telegram-admin/compose.yaml -f apps/telegram-admin/compose.continuous.yaml -f apps/telegram-admin/compose.ai.yaml -f apps/telegram-admin/compose.features.yaml -f apps/telegram-admin/compose.controls.yaml -f apps/telegram-admin/compose.controls.ai.yaml config --quiet
+          docker compose -f apps/telegram-admin/compose.voice.yaml config --quiet
+          docker compose -f apps/business/compose.media.yaml config --quiet
+          cp apps/business/.env.example apps/business/.env
+          docker compose -f apps/business/compose.yaml -f apps/business/compose.ai.yaml -f apps/business/compose.panel.yaml config --quiet
+          rm apps/business/.env
+      - uses: docker/setup-buildx-action@v4
+      - name: Reproduce public source permissions from a root checkout with umask 077
+        run: find src apps -type f -exec chmod 0600 {} +
+      - name: Build without publishing an image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/telegram-admin/Dockerfile
+          load: true
+          push: false
+          tags: |
+            panel-admin-bot:ci
+            panel-admin-bot:local
+      - name: Offline startup guard and non-root user
+        run: |
+          if docker run --rm --network none panel-admin-bot:ci; then
+            echo "Unexpected live startup without approval"
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 2
+          fi
+          test "$(docker run --rm --network none --entrypoint id panel-admin-bot:ci -u)" = "1000"
+      - name: Offline validator can import root-owned 0600 build sources as UID 1000
+        run: |
+          printf 'REMNAWAVE_BASE_URL=https://panel.example.invalid\nBOT_USERNAME=example_admin_bot\nTELEGRAM_ADMIN_ID=123456789\n' > /tmp/panel-synthetic.env
+          chmod 0444 /tmp/panel-synthetic.env
+          docker run --rm --pull never --network none --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true --memory 128m --memory-swap 128m --cpus 0.25 --pids-limit 32 --mount type=bind,src=/tmp/panel-synthetic.env,dst=/configuration.env,readonly --entrypoint node panel-admin-bot:ci /app/apps/telegram-admin/ops-config.mjs base /configuration.env
+          rm /tmp/panel-synthetic.env
+      - name: Build optional customer portal, without private configuration
+        run: docker build -f apps/business/Dockerfile -t panel-admin-business:ci .
+      - name: Optional portal refuses startup without explicit enablement
+        run: |
+          if docker run --rm --network none --tmpfs /state:rw,uid=1000,gid=1000,size=16m --tmpfs /business-bridge:rw,uid=1000,gid=1000,size=1m panel-admin-business:ci; then exit 1; fi
+          test "$(docker run --rm --network none --entrypoint id panel-admin-business:ci -u)" = "1000"
+          docker run --rm --network none --read-only --entrypoint node panel-admin-business:ci --input-type=module -e 'for (const name of ["config", "store", "portal", "reference-search", "media-client", "guides", "billing-admin"]) await import("/app/apps/business/" + name + ".mjs"); console.log("Public business modules readable as non-root; no credentials used.");'
+      - name: Build local-only voice decoder with a pinned public model revision
+        run: docker build -f apps/telegram-admin/Dockerfile.voice -t panel-admin-voice:ci .
+      - name: Voice model loads with all runtime network access disabled
+        run: docker run --rm --network none --memory 768m --memory-swap 768m --cpus 0.75 --read-only --tmpfs /tmp:rw,size=16m --entrypoint python panel-admin-voice:ci -c "import ast; ast.parse(open('/app/voice-worker.py', encoding='utf-8').read()); from faster_whisper import WhisperModel; WhisperModel('/model',device='cpu',compute_type='int8',cpu_threads=1,num_workers=1,local_files_only=True); print('Offline local model loaded')"
+      - name: Build isolated local media decoder
+        run: docker build -f apps/business/Dockerfile.media -t panel-admin-media:ci .
+      - name: Local media decoder has both OCR languages and no network or credentials
+        run: |
+          docker run --rm --network none --read-only --entrypoint tesseract panel-admin-media:ci --list-langs | grep -q rus
+          docker run --rm --network none --read-only --entrypoint tesseract panel-admin-media:ci --list-langs | grep -q eng
+          test "$(docker run --rm --network none --entrypoint id panel-admin-media:ci -u)" = "1000"
+          docker run --rm --network none --read-only --entrypoint python panel-admin-media:ci -c "import ast; ast.parse(open('/app/media-worker.py', encoding='utf-8').read()); print('Media worker readable as non-root')"
+      - name: Default worker commands boot as UID 1000 and voice decodes synthetic silence offline
+        run: |
+          set -euo pipefail
+          worker_container=''
+          cleanup_worker() {
+            if [[ -n "$worker_container" ]]; then docker rm -f "$worker_container" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup_worker EXIT
+          for worker in voice media; do
+            if [[ "$worker" == voice ]]; then bridge=/voice; memory=768m; else bridge=/media-bridge; memory=512m; fi
+            worker_container=$(docker run --detach --network none --read-only --user 1000:1000 --init --cap-drop ALL --security-opt no-new-privileges:true --memory "$memory" --memory-swap "$memory" --cpus 0.75 --pids-limit 48 --tmpfs "$bridge:rw,uid=1000,gid=1000,size=1m,mode=700" --tmpfs /tmp:rw,noexec,nosuid,size=16m,mode=1777 "panel-admin-$worker:ci")
+            [[ "$worker_container" =~ ^[0-9a-f]{64}$ ]]
+            if ! docker exec -i "$worker_container" python - "$worker" < apps/telegram-admin/worker-runtime-check.py; then
+              docker logs --tail 40 "$worker_container"
+              exit 1
+            fi
+            cleanup_worker
+            worker_container=''
+          done
+      - name: Offline SQLite budget and real MCP transport in the runtime image
+        run: |
+          docker run --rm -i --network none --read-only --tmpfs /state:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-bot:ci --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createIntentStore } from '/app/apps/telegram-admin/intent-store.mjs';
+          import { createBudgetedIntent } from '/app/apps/telegram-admin/budgeted-intent.mjs';
+          import { connectReportMcp } from '/app/apps/telegram-admin/report-mcp.mjs';
+          import { resolveLocalRequest } from '/app/apps/telegram-admin/local-router.mjs';
+          import { createDashboard } from '/app/apps/telegram-admin/dashboard.mjs';
+          import { createMenuSession } from '/app/apps/telegram-admin/menu-session.mjs';
+          import { readRuntimeControls, applyReportPolicy } from '/app/apps/telegram-admin/runtime-controls.mjs';
+          import { validateBaseConfiguration, validateControlConfiguration } from '/app/apps/telegram-admin/ops-config.mjs';
+          assert.equal(readRuntimeControls({ AI_DAILY_LIMIT: '10' }).dailyLimit, 10);
+          assert.equal(validateBaseConfiguration('REMNAWAVE_BASE_URL=https://panel.example.invalid\nBOT_USERNAME=example_admin_bot\nTELEGRAM_ADMIN_ID=123456789\n'), true);
+          assert.equal(validateControlConfiguration('AI_ENABLED=true\nBOT_ENHANCED_UI=true\nAI_DAILY_LIMIT=10\nPANEL_ALLOWED_REPORTS=stats,nodes\n').dailyLimit, 10);
+          await assert.rejects(applyReportPolicy({ stats: async () => { throw new Error('MUST_NOT_CALL'); } }, []).stats(), /REPORT_DISABLED/);
+          assert.equal(resolveLocalRequest('пришли статистику').intent.action, 'stats');
+          assert.equal(resolveLocalRequest('статистика нод').intent.action, 'nodes');
+          assert.equal(resolveLocalRequest('сколько юзеров онлайн').intent.action, 'online');
+          assert.equal(typeof createDashboard, 'function');
+          assert.equal(typeof createMenuSession, 'function');
+          const store = createIntentStore({ filename: '/state/test.sqlite' });
+          assert.equal(store.status().limit, 100);
+          let calls = 0;
+          const classify = createBudgetedIntent({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
+          await classify('Synthetic report');
+          await classify('  SYNTHETIC REPORT? ');
+          assert.equal(calls, 1);
+          assert.equal(store.status().used, 1);
+          const reports = await connectReportMcp({ stats: async () => ({ totalUsers: 10, usersOnline: 2, observedAt: '2026-10-15T12:00:00.000Z' }) });
+          assert.equal((await reports.read('stats')).usersOnline, 2);
+          await reports.close();
+          store.close();
+          console.log('Offline runtime budget and MCP checks passed; no network or model requests.');
+          NODE
+      - name: Build isolated AI image without credentials
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/telegram-admin/Dockerfile.ai
+          load: true
+          push: false
+          tags: panel-admin-ai:ci
+      - name: Verify pinned CLI and disabled features offline, without model inference
+        run: |
+          docker run --rm --network none --read-only --entrypoint node panel-admin-ai:ci --input-type=module -e 'import assert from "node:assert/strict"; import { readFileSync } from "node:fs"; import { X509Certificate } from "node:crypto"; const path = "/etc/ssl/certs/ca-certificates.crt"; assert.equal(process.env.CODEX_CA_CERTIFICATE, path); const certificates = readFileSync(path, "utf8").match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g); assert.ok(certificates?.length); for (const certificate of certificates) new X509Certificate(certificate); console.log("System CA bundle is present and parseable; TLS verification remains enabled.");'
+          docker run --rm --network none --read-only --tmpfs /home/node/.codex:rw,uid=1000,gid=1000,size=16m --tmpfs /tmp:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-ai:ci --input-type=module -e 'import { verifyClassifierCli } from "/app/apps/telegram-admin/verify-ai-cli.mjs"; verifyClassifierCli({ requireLogin: false }); console.log("Pinned CLI and disabled features verified; no credentials or inference.");'
+          test "$(docker run --rm --network none --entrypoint id panel-admin-ai:ci -u)" = "1000"
+          if docker run --rm --network none panel-admin-ai:ci; then
+            echo "Unexpected AI startup without approval"
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 2
+          fi
+      - name: Inspect native startup events without credentials or network
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 64 --cpus 0.5 --memory 512m --memory-swap 512m --tmpfs /home/node/.codex:rw,uid=1000,gid=1000,size=16m --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 --entrypoint node panel-admin-ai:ci --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { existsSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import { classifierArguments, classifierDiagnostic, guardClassifierEvent } from '/app/apps/telegram-admin/codex-classifier.mjs';
+          assert.equal(existsSync('/home/node/.codex/auth.json'), false);
+          const result = spawnSync('codex', classifierArguments(), {
+            input: 'Untrusted administrator question:\n"Synthetic status request"',
+            encoding: 'utf8', timeout: 15000, maxBuffer: 65536,
+            env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/home/node', CODEX_HOME: '/home/node/.codex', LANG: 'C.UTF-8', TMPDIR: '/tmp', CODEX_CA_CERTIFICATE: '/etc/ssl/certs/ca-certificates.crt' },
+          });
+          const events = [];
+          let completed = false;
+          for (const line of String(result.stdout ?? '').split('\n').filter(value => value.trim())) {
+            try { guardClassifierEvent(line); events.push({ accepted: true }); }
+            catch (error) { events.push(classifierDiagnostic(error)); }
+            const value = JSON.parse(line);
+            if (value.type === 'item.completed' && value.item?.type === 'error') assert.doesNotThrow(() => guardClassifierEvent(line));
+            if (value.type === 'turn.completed' || value.item?.type === 'agent_message') completed = true;
+          }
+          assert.equal(completed, false);
+          assert.equal(existsSync('/home/node/.codex/auth.json'), false);
+          assert.ok(!result.error || result.error.code === 'ETIMEDOUT');
+          assert.doesNotMatch(String(result.stderr ?? ''), /unexpected argument|unknown field|unknown variant|unknown feature|error loading config|invalid config/i);
+          console.log(JSON.stringify({ offlineStartup: true, noAuth: true, noCompletedTurn: !completed, timedOut: result.error?.code === 'ETIMEDOUT', exitCode: result.status, events }));
+          NODE
+      - name: Exercise the Unix socket and independent quota offline in the AI image
+        run: |
+          docker run --rm -i --network none --read-only --tmpfs /state:rw,uid=1000,gid=1000,size=16m --tmpfs /bridge:rw,uid=1000,gid=1000,size=16m --entrypoint node panel-admin-ai:ci --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { createClassifierServer } from '/app/apps/telegram-admin/ai-worker.mjs';
+          import { createClassifierClient } from '/app/apps/telegram-admin/ai-client.mjs';
+          import { createIntentStore } from '/app/apps/telegram-admin/intent-store.mjs';
+          const store = createIntentStore({ filename: '/state/test.sqlite', dailyLimit: 1 });
+          let calls = 0;
+          const server = createClassifierServer({ store, classify: async () => { calls++; return { action: 'stats', days: 3 }; } });
+          await new Promise(resolve => server.listen('/bridge/classifier.sock', resolve));
+          const classify = createClassifierClient();
+          await classify.checkReady();
+          assert.equal(calls, 0);
+          assert.equal(store.status().used, 0);
+          assert.deepEqual(await classify('Synthetic report'), { action: 'stats', days: 3 });
+          await assert.rejects(classify('Second report'));
+          assert.equal(calls, 1);
+          assert.equal(store.status().used, 1);
+          server.closeAllConnections();
+          await new Promise(resolve => server.close(resolve));
+          store.close();
+          const guardedStore = createIntentStore({ filename: '/state/guard.sqlite' });
+          assert.equal(guardedStore.status().limit, 100);
+          let guardCalls = 0;
+          let paused = false;
+          const events = [];
+          const { decodeClassifierOutput } = await import('/app/apps/telegram-admin/codex-classifier.mjs');
+          const guarded = createClassifierServer({ store: guardedStore, paused: () => paused, pause: () => { paused = true; }, onEvent: event => events.push(event), classify: async () => {
+            guardCalls++;
+            const raw = [
+              { type: 'item.completed', item: { type: 'agent_message', text: '{"action":"stats","days":3}' } },
+              { type: 'turn.completed', usage: { input_tokens: 8001, output_tokens: 1 } },
+            ].map(value => JSON.stringify(value)).join('\n');
+            return decodeClassifierOutput(raw).intent;
+          } });
+          await new Promise(resolve => guarded.listen('/bridge/classifier.sock', resolve));
+          await assert.rejects(classify('Synthetic guard question'), /AI_UNAVAILABLE/);
+          await assert.rejects(classify.checkReady(), /AI_PAUSED/);
+          assert.equal(guardCalls, 1);
+          assert.equal(guardedStore.status().used, 1);
+          assert.equal(events[0].reason, 'INPUT_LIMIT');
+          assert.equal(events[0].inputTokens, 8001);
+          assert.equal(events[0].paused, true);
+          guarded.closeAllConnections();
+          await new Promise(resolve => guarded.close(resolve));
+          guardedStore.close();
+          console.log('Offline socket and worker quota passed; classifier is synthetic.');
+          NODE

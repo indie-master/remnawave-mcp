@@ -1,0 +1,53 @@
+services:
+  bot:
+    environment:
+      AI_ENABLED: "true"
+      AI_CONFIRM_SUBSCRIPTION_USAGE: "true"
+      AI_SOCKET_PATH: /bridge/classifier.sock
+    volumes:
+      - ai-bridge:/bridge
+  ai:
+    env_file:
+      - path: ./.env.extensions
+        required: false
+    image: panel-admin-ai:local
+    build:
+      context: ../..
+      dockerfile: apps/telegram-admin/Dockerfile.ai
+    command: ["--serve", "--confirm-subscription-usage"]
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.50
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 64
+    stop_grace_period: 15s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    environment:
+      AI_ENABLED: "true"
+      CODEX_HOME: /home/node/.codex
+      HOME: /home/node
+    volumes:
+      - ai-bridge:/bridge
+      - ai-state:/state
+      - codex-auth:/home/node/.codex
+    healthcheck:
+      test: ["CMD", "node", "/app/apps/telegram-admin/healthcheck.mjs"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"
+volumes:
+  ai-bridge:
+  ai-state:
+  codex-auth:
