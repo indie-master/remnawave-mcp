@@ -9,7 +9,7 @@ const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     signal?.addEventListener('abort', finish, { once: true });
 });
 
-export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, autoMenu = false, voiceInput, adminHandle, extraButtons = [], aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
+export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, autoMenu = false, voiceInput, adminHandle, adminDirectory = false, extraButtons = [], aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
     if (soleReceiverConfirmed !== true || typeof continuous !== 'boolean' || !Number.isInteger(seconds) || seconds < 60 || seconds > 900) throw new Error('LIVE_START_NOT_AUTHORIZED');
     const result = { status: 'stopped', reason: null, replies: 0, polls: 0, startedAt: null, stoppedAt: null };
     let ready = false;
@@ -35,7 +35,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
             if (signal?.aborted || now() >= deadline) throw new Error('STOP_REQUESTED');
             return mcpRead(action, days);
         } : undefined;
-        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, adminHandle, extraButtons, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
+        const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, adminHandle, adminDirectory, extraButtons, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
         const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, collapsible: autoMenu, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
         await api.sendReply(notification(continuous
             ? 'Бот запущен на сервере. Кнопки работают без ИИ. Отправка клиентам отключена.'

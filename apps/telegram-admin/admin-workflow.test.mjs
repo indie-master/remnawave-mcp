@@ -44,7 +44,7 @@ test('renewal buttons only prepare a preview; an explicit one-use confirmation p
         assert.deepEqual(state.counts(), { reads: 0, writes: 0 });
         const preview = await state.send('', 'ap:42:30');
         assert.equal(state.counts().writes, 0);
-        assert.match(preview.text, /expireAt/);
+        assert.match(preview.text, /Новый срок/);
         const key = preview.reply_markup.inline_keyboard[0][0].callback_data;
         assert.match((await state.send('', key)).text, /подтверждено панелью/);
         assert.match((await state.send('', key)).text, /устарело/);

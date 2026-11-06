@@ -14,15 +14,12 @@ const menu = keyboard([
     [button('🧠 Лимит ИИ', 'budget')],
 ]);
 const extendedMenu = keyboard([
-    [button('📊 Статистика', 'q:stats'), button('🖥 Ноды', 'q:nodes')],
-    [button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')],
-    [button('⏳ Подписки', 'periods'), button('📋 Список нод', 'q:node_details')],
-    [button('⚙️ Ресурсы', 'q:system'), button('📈 Трафик', 'q:bandwidth')],
-    [button('🗂 Конфигурация', 'configuration'), button('🩺 Процессы', 'q:health')],
-    [button('ℹ️ Версия', 'q:version'), button('🧠 Лимит ИИ', 'budget')],
+    [button('📊 Статистика и пользователи', 'q:stats'), button('🖥 Ноды', 'q:nodes')],
+    [button('⏳ Истекающие подписки', 'periods'), button('🗂 Конфигурация', 'configuration')],
+    [button('🧠 Лимит ИИ', 'budget')],
 ]);
 
-export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, adminHandle, extraButtons = [], answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
+export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, adminHandle, adminDirectory = false, extraButtons = [], answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
     if (!Number.isSafeInteger(allowedUserId) || allowedUserId <= 0) throw new Error('INVALID_ADMIN_ID');
     const reports = new Map();
     const drafts = new Map();
@@ -31,6 +28,13 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     let lastRead = -Infinity;
     let busy = false;
     let context;
+    let statsScreen;
+    const back = callback => [button('⬅ Назад', callback)];
+    const homeButton = button('🏠 Меню', 'home');
+    const statsRows = [[button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')], [button('⚙️ Ресурсы', 'q:system'), button('🩺 Процессы', 'q:health')], [button('📈 Трафик', 'q:bandwidth'), button('ℹ️ Версия', 'q:version')]];
+    const userRows = [[button('📋 Список пользователей', 'aul:0'), button('🔎 Найти пользователя', 'admin_search')], [button('🗒 Операции', 'admin_operations')]];
+    const nodeList = [button('📋 Список нод', adminDirectory ? 'anl:0' : 'q:node_details')];
+    const parentOf = action => ({ expiring: 'periods', node_details: 'q:nodes', online: 'stats_menu', users: 'stats_menu', system: 'stats_menu', bandwidth: 'stats_menu', health: 'stats_menu', version: 'stats_menu', hosts: 'configuration', profiles: 'configuration', internal_squads: 'configuration', external_squads: 'configuration' })[action] ?? 'home';
     const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
     const home = () => reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (textModeDescription ?? (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.')) + '\nУведомления: только черновики администратору.', keyboard([...(enhancedUi ? extendedMenu : menu).inline_keyboard, ...extraButtons]));
     function clarification(topic, recognizedText) {
@@ -49,7 +53,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         if (page > 0) navigation.push(button('←', `nodepage:${key}:${page - 1}`));
         if ((page + 1) * 5 < report.nodes.length) navigation.push(button('→', `nodepage:${key}:${page + 1}`));
         lines.push(`\nПроверено: ${time(report.observedAt)} МСК`);
-        return reply(lines.join('\n'), keyboard([...(navigation.length ? [navigation] : []), [button('🔄 Обновить', 'q:node_details'), button('🏠 Меню', 'home')]]));
+        return reply(lines.join('\n'), keyboard([...(navigation.length ? [navigation] : []), [button('🔄 Обновить', 'q:node_details'), homeButton], ...(enhancedUi ? [back('q:nodes')] : [])]));
     }
 
     function snapshot(key) {
@@ -83,6 +87,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         if (page + 1 < pages) navigation.push(button('→', `page:${key}:${page + 1}`));
         if (navigation.length) rows.push(navigation);
         rows.push([button('🔄 Проверить заново', `q:expiring:${report.days}`), button('🏠 Меню', 'home')]);
+        if (enhancedUi) rows.push(back('periods'));
         return reply(lines.join('\n'), keyboard(rows));
     }
     function render(action, report) {
@@ -94,7 +99,16 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 ? ['<b>🖥 Состояние нод</b>', `Всего: ${report.nodesTotal}`, `🟢 Онлайн: ${report.nodesOnline}`, `🔴 Офлайн: ${report.nodesOffline}`, `⚪ Отключены: ${report.nodesDisabled}`, `🟡 Подключаются: ${report.nodesConnecting}`]
                 : ['<b>ℹ️ Версия панели</b>', escapeHtml(report.panelVersion)]);
         lines.push(`\nПроверено: ${time(report.observedAt)} МСК`);
-        return reply(lines.join('\n'), keyboard([[button('🔄 Проверить заново', `q:${action}`), button('🏠 Меню', 'home')]]));
+        const rows = [[button('🔄 Проверить заново', `q:${action}`), homeButton]];
+        if (enhancedUi) {
+            if (action === 'stats') rows.push(...statsRows);
+            if (action === 'nodes') rows.push(nodeList);
+            if (action === 'users' && adminDirectory) rows.push(...userRows);
+            rows.push(back(parentOf(action)));
+        }
+        const screen = reply(lines.join('\n'), keyboard(rows));
+        if (enhancedUi && action === 'stats') statsScreen = screen;
+        return screen;
     }
 
     const handle = async update => {
@@ -117,6 +131,8 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             if (!Number.isSafeInteger(message.date) || age > 120 || age < -15 || message.forward_origin || message.forward_from || message.forward_from_chat || typeof message.text !== 'string' || message.text.length > 2000)
                 return null;
         }
+        let failureBack = 'home';
+        let failureRows = [];
         try {
             const data = callback?.data;
             let text = callback ? '' : message.text.trim();
@@ -137,20 +153,21 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             }
             if (/^(?:плат[её]ж|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) return reply('Бизнес-модуль или это действие не включены. Запрос к ИИ не выполнялся.');
             if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return home();
+            if (data === 'stats_menu') return statsScreen ?? reply('<b>📊 Статистика и пользователи</b>\nВыберите отчёт.', keyboard([...statsRows, [button('📊 Общая сводка', 'q:stats')], back('home')]));
             if (data === 'budget' || text === '/budget') {
                 if (!budgetStatus) return reply('Учёт ИИ недоступен. Кнопки работают без ИИ.');
                 const budget = await budgetStatus();
-                return reply(`<b>🧠 Лимит ИИ</b>\nСутки: ${escapeHtml(budget.day)} МСК\nПопыток: ${budget.used}/${budget.limit}\nОсталось: ${budget.remaining}\nСохранённых команд: ${budget.cacheEntries}${budget.shared ? `\n\nОбщий ИИ: бот + поддержка\nПопыток: ${budget.shared.used}/${budget.shared.limit}\nОсталось всего: ${budget.shared.remaining}` : ''}\n\nКнопки, локальные команды и повторения из кеша не расходуют лимит. Ошибки ИИ учитываются. Это счётчик вызовов нашего проекта, не остаток подписки ChatGPT.`);
+                return reply(`<b>🧠 Лимит ИИ</b>\nСутки: ${escapeHtml(budget.day)} МСК\nПопыток: ${budget.used}/${budget.limit}\nОсталось: ${budget.remaining}\nСохранённых команд: ${budget.cacheEntries}${budget.shared ? `\n\nОбщий ИИ: бот + поддержка\nПопыток: ${budget.shared.used}/${budget.shared.limit}\nОсталось всего: ${budget.shared.remaining}` : ''}\n\nКнопки, локальные команды и повторения из кеша не расходуют лимит. Ошибки ИИ учитываются. Это счётчик вызовов нашего проекта, не остаток подписки ChatGPT.`, enhancedUi ? keyboard([back('home')]) : undefined);
             }
             if (data === 'periods' || text === '/expiring') return reply('За какой период проверить подписки?', keyboard([
                 ...[[1, 3, 7], [14, 30]].map(days => days.map(day => button(`${day} дн.`, `q:expiring:${day}`))),
-                [button('🏠 Меню', 'home')],
+                back('home'),
             ]));
             if (data === 'configuration') return reply('<b>🗂 Конфигурация: проверки чтения</b>\nПоказываются только счётчики. Ключи и содержимое конфигураций скрыты.', keyboard([
                 [button('🌐 Хосты', 'q:hosts'), button('🗂 Профили', 'q:profiles')],
                 [button('🔹 Внутренние сквады', 'q:internal_squads')],
                 [button('🔸 Внешние сквады', 'q:external_squads')],
-                [button('🏠 Меню', 'home')],
+                back('home'),
             ]));
             const nodeNavigation = data?.match(/^nodepage:([A-Za-z0-9_-]{8,24}):(\d+)$/);
             if (nodeNavigation) return nodePage(nodeNavigation[1], Number(nodeNavigation[2]));
@@ -162,15 +179,16 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 if (!user) throw new Error('INVALID_PAGE');
                 while (drafts.size >= 50) drafts.delete(drafts.keys().next().value);
                 const key = nonce();
-                drafts.set(key, { savedAt: now(), approved: false });
-                return reply(`<b>📝 Черновик для #${user.id}</b>\n\nЗдравствуйте! Ваша подписка заканчивается ${time(user.expireAt)} МСК. Для продления свяжитесь с поддержкой.\n\n<b>Сообщение не отправлено.</b> Подтверждение ниже только отмечает готовность черновика.`, keyboard([[button('✅ Подтвердить черновик', `approve:${key}`), button('Отменить', `cancel:${key}`)], [button('К списку', `page:${saved[2]}:0`)]]));
+                const parent = `page:${saved[2]}:${Math.floor(Number(saved[3]) / 5)}`;
+                drafts.set(key, { savedAt: now(), parent });
+                return reply(`<b>📝 Черновик для #${user.id}</b>\n\nЗдравствуйте! Ваша подписка заканчивается ${time(user.expireAt)} МСК. Для продления свяжитесь с поддержкой.\n\n<b>Сообщение не отправлено.</b> Подтверждение ниже только отмечает готовность черновика.`, keyboard([[button('✅ Подтвердить черновик', `approve:${key}`), button('Отменить', `cancel:${key}`)], back(parent)]));
             }
             const approval = data?.match(/^(approve|cancel):([A-Za-z0-9_-]{8,24})$/);
             if (approval) {
                 const draft = drafts.get(approval[2]);
                 if (!draft || now() - draft.savedAt > 600000) throw new Error('REPORT_EXPIRED');
                 drafts.delete(approval[2]);
-                return reply(approval[1] === 'approve' ? '✅ Черновик подтверждён. <b>Клиенту ничего не отправлено.</b> Реальная отправка отключена.' : 'Черновик отменён. Клиенту ничего не отправлено.');
+                return reply(approval[1] === 'approve' ? '✅ Черновик подтверждён. <b>Клиенту ничего не отправлено.</b> Реальная отправка отключена.' : 'Черновик отменён. Клиенту ничего не отправлено.', keyboard([back(draft.parent), [homeButton]]));
             }
             let intent;
             let source;
@@ -209,7 +227,8 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                     return reply(`<b>🎙 Распознано локально:</b>\n${escapeHtml(text)}\n\nКоманда не найдена среди локальных и сохранённых. Передать этот текст ИИ? Это может израсходовать одну попытку. До подтверждения ИИ не вызывался. Подтверждение действует 3 минуты.`, keyboard([[button('🧠 Разобрать с ИИ', `voice_ai:${key}`), button('✖ Отмена', `voice_cancel:${key}`)], [button('🏠 Меню', 'home')]]));
                 }
             }
-            if (busy || now() - lastRead < 5000) return reply('Дождитесь завершения запроса и повторите через пять секунд.');
+            failureBack = parentOf(intent?.action);
+            if (busy || ((!callback || voiceApproved || !enhancedUi) && now() - lastRead < 5000)) return reply('Дождитесь завершения запроса и повторите через пять секунд.', keyboard([back(failureBack)]));
             busy = true;
             lastRead = now();
             let stage = intent ? 'panel' : 'ai';
@@ -220,6 +239,9 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                     source = 'mcp';
                 }
                 if (intent.action === 'help') return reply('Могу проверить статистику, пользователей онлайн, ноды, версию, подписки, ресурсы, трафик и счётчики конфигурации. Изменения и отправка клиентам недоступны.');
+                failureBack = parentOf(intent.action);
+                if (enhancedUi && intent.action === 'stats') failureRows = statsRows;
+                if (enhancedUi && adminDirectory && intent.action === 'users') failureRows = userRows;
                 stage = 'panel';
                 const report = source === 'direct'
                     ? await service[intent.action](intent.action === 'expiring' ? { days: intent.days } : undefined)
@@ -234,7 +256,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 throw error;
             } finally { busy = false; }
         } catch (error) {
-            if (error?.message === 'REPORT_DISABLED') return reply('Этот отчёт отключён в локальных разрешениях бота. API панели не запрашивался; изменить список может администратор через SSH. Права самого токена панели не менялись.');
+            if (error?.message === 'REPORT_DISABLED') return reply('Этот отчёт отключён в локальных разрешениях бота. API панели не запрашивался; изменить список может администратор через SSH. Права самого токена панели не менялись.', keyboard([...failureRows, back(failureBack)]));
             if (error?.message === 'LOCAL_CLARIFICATION_REQUIRED') return clarification(['period', 'squads'].includes(error.topic) ? error.topic : 'scope', !callback && update.inputSource === 'local-voice' ? message.text.trim() : undefined);
             if (error?.message === 'AI_PAUSED') return reply('ИИ на защитной паузе. Кнопки и уже известные вопросы работают без него. Для новых вопросов требуется проверка ИИ-модуля администратором.');
             if (error?.message === 'AI_BRIDGE_UNAVAILABLE') return reply('ИИ-модуль сейчас недоступен. Проверка готовности не расходует попытку. Используйте кнопки или знакомые вопросы.');
@@ -246,7 +268,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             if (error?.message === 'AI_STATE_UNAVAILABLE' || error?.message === 'AI_CLOCK_UNAVAILABLE') return reply('Безопасный учёт ИИ недоступен, поэтому новый вызов запрещён. Кнопки работают без ИИ.');
             if (error?.message === 'USERS_READ_NOT_ENABLED') return reply('Отчёт о подписках ещё не включён: текущему интеграционному токену нужно отдельное разрешение <code>users:list</code>. Права панели не менялись.');
             if (error?.message === 'REPORT_EXPIRED') return reply('Сохранённый отчёт или черновик устарел. Выполните проверку заново.');
-            return reply('Данные недоступны или запрос не поддерживается. Проверьте токен, права чтения и доступность ИИ. Изменения не выполнялись.');
+            return reply('Данные недоступны или запрос не поддерживается. Проверьте токен, права чтения и доступность ИИ. Изменения не выполнялись.', keyboard([...failureRows, back(failureBack)]));
         }
     };
     return Object.assign(handle, { home });

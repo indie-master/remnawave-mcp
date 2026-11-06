@@ -8,6 +8,7 @@
 !apps/
 !apps/telegram-admin/
 !apps/telegram-admin/admin-users.mjs
+!apps/telegram-admin/admin-panel-actions.mjs
 !apps/business/
 !apps/business/Dockerfile
 !apps/business/Dockerfile.dockerignore

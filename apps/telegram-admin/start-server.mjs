@@ -45,7 +45,8 @@ async function main() {
     const apiOptions = { token, allowedUserId: config.allowedUserId, enableButtons: true };
     const api = createTelegramApi({ ...apiOptions, signal: controller.signal });
     const finalApi = createTelegramApi(apiOptions);
-    if (extensions.adminRead) administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile, signal: controller.signal }), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields });
+    const nodesEnabled = config.allowedReports.includes('nodes') && config.allowedReports.includes('node_details');
+    if (extensions.adminRead) administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile, signal: controller.signal }), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields, actionUserIds: extensions.actionUserIds, actionNodeUuids: extensions.actionNodeUuids, nodesEnabled });
     const userHandler = administration ? createAdminHandler({ administration, actorId: config.allowedUserId, renewalDays: extensions.renewalDays }) : undefined;
     const businessHandler = extensions.business ? createBusinessAdmin({ actorId: config.allowedUserId, administration }) : undefined;
     const offsetFile = join(config.stateDirectory, 'offset.json');
@@ -61,7 +62,8 @@ async function main() {
         ...options, api, service, allowedUserId: config.allowedUserId, botUsername: config.botUsername, signal: controller.signal,
         classify, budgetStatus: intentStore ? async () => { const local = intentStore.status(); try { return { ...local, shared: await aiClient?.usage() }; } catch { return local; } } : undefined, enhancedUi: config.enhancedUi, aiEnabled: config.aiEnabled && !!classify,
         autoMenu: extensions.autoMenu,
-        extraButtons: [...(userHandler ? [[{ text: '👤 Найти пользователя', callback_data: 'admin_home' }]] : []), ...(businessHandler ? [[{ text: '💳 Оплаты и продления', callback_data: 'business_home' }]] : [])],
+        adminDirectory: !!userHandler,
+        extraButtons: [...(userHandler && !config.enhancedUi ? [[{ text: '👤 Найти пользователя', callback_data: 'admin_home' }]] : []), ...(businessHandler ? [[{ text: '💳 Оплаты и продления', callback_data: 'business_home' }]] : [])],
         voiceInput: extensions.voice ? createVoiceInput({ api, allowedUserId: config.allowedUserId, maxSeconds: extensions.voiceSeconds, maxBytes: extensions.voiceBytes }) : undefined,
         adminHandle: userHandler || businessHandler ? async request => (await userHandler?.(request)) ?? (await businessHandler?.(request)) : undefined,
         textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${config.dailyLimit} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,

@@ -16,7 +16,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
     if (!Number.isSafeInteger(actorId) || actorId <= 0) throw new Error('INVALID_ADMIN_ID');
     const previews = new Map();
     const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
-    const reply = (text, rows = [[{ text: '🏠 Меню', callback_data: 'home' }]]) => ({ text, reply_markup: { inline_keyboard: rows } });
+    const reply = (text, rows = [], parent = 'business_home') => ({ text, reply_markup: { inline_keyboard: rows.some(row => row.some(button => button.text === 'Назад')) ? rows : [...rows, [{ text: 'Назад', callback_data: parent }]] } });
     return async ({ text, data, allowedUserId }) => {
         if (allowedUserId !== actorId) return null;
         const supportReply = text?.match(/^ответ\s+([a-f0-9]{24})\s+([\s\S]{1,1000})$/i);
@@ -76,7 +76,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
                 const media = previews.get(data.slice(3)); previews.delete(data.slice(3));
                 if (!media?.media || now() - media.at > 180000) return reply('Подтверждение устарело.');
                 const result = await call('/media-approve', { id: media.id });
-                return reply(escape(result.reply ?? 'Текст проверен. Ответ доступен в истории клиента.'));
+                return reply(escape(result.reply ?? 'Текст проверен. Ответ доступен в истории клиента.'), [], 'business_support');
             }
             if (data?.startsWith('bx:')) { previews.delete(data.slice(3)); return reply('Подтверждение отменено; новых операций не отправлялось.'); }
             if (data?.startsWith('bc:')) {
@@ -96,7 +96,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
                     outcome = ['rejected', 'cancelled'].includes(administration.receipt(actorId, preview.proposal)) ? 'rejected' : 'uncertain';
                 }
                 await call('/renewal-settle', { id: preview.id, outcome });
-                return reply(outcome === 'done' ? '✅ Подписка продлена, стоимость списана с баланса один раз.' : outcome === 'rejected' ? 'Панель не изменена. Резерв баланса возвращён; создайте новую заявку.' : 'Результат изменения неясен. Средства удержаны до ручной сверки; повторного запроса и автоматического возврата нет.');
+                return reply(outcome === 'done' ? '✅ Подписка продлена, стоимость списана с баланса один раз.' : outcome === 'rejected' ? 'Панель не изменена. Резерв баланса возвращён; создайте новую заявку.' : 'Результат изменения неясен. Средства удержаны до ручной сверки; повторного запроса и автоматического возврата нет.', [], 'business_renewals');
             }
             const pending = await call('/pending');
             if (!Array.isArray(pending.payments) || !Array.isArray(pending.renewals)) throw new Error();
@@ -109,7 +109,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
                 const key = randomBytes(12).toString('base64url');
                 while (previews.size > 20) previews.delete(previews.keys().next().value);
                 previews.set(key, { renewal: true, id: renewal.id, proposal: proposal.id, at: now() });
-                return reply(`<b>Продление пользователя #${renewal.panel_id}</b>\nНовый срок: ${expireAt}\nС баланса: ${renewal.units / (renewal.currency === 'RUB' ? 100 : 1000000)} ${renewal.currency}\nБудут проверены текущие данные и остаток. При неопределённом результате повтор запрещён до ручной сверки.`, [[{ text: '✅ Продлить и списать', callback_data: `rc:${key}` }, { text: 'Отмена', callback_data: `bx:${key}` }]]);
+                return reply(`<b>Продление пользователя #${renewal.panel_id}</b>\nНовый срок: ${expireAt}\nС баланса: ${renewal.units / (renewal.currency === 'RUB' ? 100 : 1000000)} ${renewal.currency}\nБудут проверены текущие данные и остаток. При неопределённом результате повтор запрещён до ручной сверки.`, [[{ text: '✅ Продлить и списать', callback_data: `rc:${key}` }, { text: 'Отмена', callback_data: `bx:${key}` }]], 'business_renewals');
             }
             if (data === 'business_renewals') return reply('<b>Заявки продления</b>\nСтоимость и срок фиксируются при создании заявки, окончательное изменение — только после подтверждения.', [...pending.renewals.filter(value => /^[a-f0-9]{24}$/.test(value.id) && Number.isSafeInteger(value.panel_id)).slice(0, 10).map(value => [{ text: `Продлить #${value.panel_id}`, callback_data: `br:${value.id}` }]), [{ text: '🏠 Меню', callback_data: 'home' }]]);
             if (data === 'business_support' || text === 'поддержка') {
@@ -126,7 +126,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
             }
             const payments = pending.payments.filter(value => /^[a-f0-9]{24}$/.test(value.id) && ['RUB', 'USDT'].includes(value.currency) && Number.isSafeInteger(value.units));
             const renewals = pending.renewals.filter(value => /^[a-f0-9]{24}$/.test(value.id) && Number.isSafeInteger(value.panel_id));
-            return reply(`<b>Оплаты: ${payments.length}</b>\nПоказаны кнопки первых 10; после подтверждения обновите список.\nПодтверждение только после проверки поступления.\n\n<b>Заявки продления: ${renewals.length}</b>\nПродление и списание требуют отдельного подтверждения.`, [...payments.slice(0, 10).map(value => [{ text: `${value.currency} ${value.units / (value.currency === 'RUB' ? 100 : 1000000)} · ${value.id.slice(0, 6)}`, callback_data: `bp:${value.id}` }]), [{ text: '⏳ Продления', callback_data: 'business_renewals' }], ...(pending.features?.reconciliation === true ? [[{ text: '🔎 Ручная сверка', callback_data: 'business_recovery' }, { text: '🗒 Журнал', callback_data: 'business_history' }]] : []), [{ text: '🛟 Обращения поддержки', callback_data: 'business_support' }], [{ text: '🏠 Меню', callback_data: 'home' }]]);
-        } catch { return reply('Бизнес-модуль недоступен. Подтверждение оплаты не повторяется автоматически.'); }
+            return reply(`<b>Оплаты: ${payments.length}</b>\nПоказаны кнопки первых 10; после подтверждения обновите список.\nПодтверждение только после проверки поступления.\n\n<b>Заявки продления: ${renewals.length}</b>\nПродление и списание требуют отдельного подтверждения.`, [...payments.slice(0, 10).map(value => [{ text: `${value.currency} ${value.units / (value.currency === 'RUB' ? 100 : 1000000)} · ${value.id.slice(0, 6)}`, callback_data: `bp:${value.id}` }]), [{ text: '⏳ Продления', callback_data: 'business_renewals' }], ...(pending.features?.reconciliation === true ? [[{ text: '🔎 Ручная сверка', callback_data: 'business_recovery' }, { text: '🗒 Журнал', callback_data: 'business_history' }]] : []), [{ text: '🛟 Обращения поддержки', callback_data: 'business_support' }]], 'home');
+        } catch { return reply('Бизнес-модуль недоступен. Подтверждение оплаты не повторяется автоматически.', [], data === 'business_home' ? 'home' : 'business_home'); }
     };
 }

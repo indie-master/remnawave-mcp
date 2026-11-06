@@ -180,14 +180,16 @@ test('enhanced menu is opt-in and every report button uses direct API, not class
     let classifications = 0;
     const handle = createDashboard({ allowedUserId: owner, service: fixture.service, enhancedUi: true, now: () => clock, classify: async () => { classifications++; } });
     const home = await handle(message('/menu'));
-    assert.ok(home.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'q:online'));
-    let updateId = 2;
+    assert.ok(!home.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'q:online'));
+    const statistics = await handle(callback('q:stats', 11, 2));
+    assert.ok(statistics.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'q:online'));
+    let updateId = 3;
     for (const action of ['users', 'online', 'node_details', 'system', 'bandwidth', 'health', 'hosts', 'profiles', 'internal_squads', 'external_squads']) {
         clock += 5000;
         assert.match((await handle(callback(`q:${action}`, 11, updateId++))).text, /Проверено:/);
     }
     assert.equal(classifications, 0);
-    assert.equal(fixture.calls.length, 10);
+    assert.equal(fixture.calls.length, 11);
     const env = { TELEGRAM_ADMIN_ID: String(owner), BOT_USERNAME: 'example_admin_bot' };
     assert.equal(readServerConfig(env).enhancedUi, false);
     assert.equal(readServerConfig({ ...env, BOT_ENHANCED_UI: 'true' }).enhancedUi, true);

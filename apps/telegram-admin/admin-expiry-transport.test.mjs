@@ -58,7 +58,8 @@ for (const expired of [false, true]) test(`renewal uses the real contract/client
     try {
         const expected = new Date(Math.max(clock, Date.parse(state.user.expireAt)) + day).toISOString();
         const preview = await state.send('', 'ap:42:1');
-        assert.match(preview.text, /expireAt/);
+        assert.match(preview.text, /Новый срок/);
+        assert.ok(preview.text.includes(expected));
         assert.equal(state.writes.length, 0);
         const key = preview.reply_markup.inline_keyboard[0][0].callback_data;
         assert.match((await state.send('', key)).text, /подтверждено панелью/);

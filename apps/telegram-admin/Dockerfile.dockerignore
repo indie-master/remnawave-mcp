@@ -34,6 +34,7 @@
 !apps/telegram-admin/extensions.mjs
 !apps/telegram-admin/voice-client.mjs
 !apps/telegram-admin/admin-users.mjs
+!apps/telegram-admin/admin-panel-actions.mjs
 !apps/telegram-admin/business-client.mjs
 !apps/telegram-admin/state-transfer.mjs
 !apps/telegram-admin/admin-mcp.mjs
