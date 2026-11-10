@@ -43,7 +43,7 @@ export function createMenuSession({ api, handle, allowedUserId, collapsible = fa
     async function sendConversation(payload) {
         const { supportContext, ...body } = payload;
         const previous = conversations.get(supportContext);
-        const nextToken = nonce();
+        const nextToken = previous?.token ?? nonce();
         if (!/^[A-Za-z0-9_-]{8}$/.test(nextToken)) throw new Error('INVALID_MENU_TOKEN');
         const output = { ...body, reply_markup: { inline_keyboard: (body.reply_markup?.inline_keyboard ?? []).map(row => row.map(button => button.callback_data === undefined ? { ...button } : { ...button, callback_data: `m:${nextToken}:${button.callback_data}` })) } };
         if (previous) {

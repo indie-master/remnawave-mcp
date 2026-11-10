@@ -14,12 +14,12 @@ async function fixture() {
     const second = store.provision('second@example.invalid', 'synthetic-password-only', 49).id;
     store.append(first, 'user', 'Первый вопрос'); store.append(second, 'user', 'Второй вопрос');
     const tickets = [store.handoff(first), store.handoff(second)];
-    let timestamp = Date.parse('2026-11-10T12:00:00Z'); let sequence = 0; let messageId = 100; let modelCalls = 0; let uncertain = false;
+    let timestamp = Date.parse('2026-11-10T12:00:00Z'); let sequence = 0; let messageId = 100; let modelCalls = 0; let uncertain = false; let readFailure = false; let editFailure = false; let wrongThread;
     const requests = []; const delivered = new Map();
     const call = async (path, value) => {
         requests.push({ path, value });
         if (path === '/pending') return { payments: [], renewals: [], support: store.pendingSupport() };
-        if (path.startsWith('/support/')) return store.supportThread(path.split('/').at(-1));
+        if (path.startsWith('/support/')) { if (readFailure) { readFailure = false; throw new Error('SYNTHETIC_READ_UNAVAILABLE'); } if (wrongThread !== undefined) { const index = wrongThread; wrongThread = undefined; return store.supportThread(tickets[index]); } return store.supportThread(path.split('/').at(-1)); }
         if (path === '/support-close') return store.closeSupport(value.id, value.version);
         if (path === '/support-message') { const result = store.supportMessage(value.id, value.key, value.text); if (uncertain) throw new Error('SYNTHETIC_RESPONSE_LOST'); return result; }
         throw new Error('UNEXPECTED_ENDPOINT');
@@ -30,6 +30,7 @@ async function fixture() {
         if (method === 'answerCallbackQuery') return new Response(JSON.stringify({ ok: true, result: true }));
         assert.ok(['sendMessage', 'editMessageText'].includes(method)); assert.equal(body.chat_id, actor);
         assert.equal(body.supportContext, undefined);
+        if (method === 'editMessageText' && editFailure) { editFailure = false; throw new Error('SYNTHETIC_TELEGRAM_UNAVAILABLE'); }
         const id = method === 'sendMessage' ? ++messageId : body.message_id;
         delivered.set(id, body);
         return new Response(JSON.stringify({ ok: true, result: { message_id: id, chat: { id: actor } } }));
@@ -47,8 +48,9 @@ async function fixture() {
         await session.process(update); return update;
     };
     await click(main, 'business_support');
-    const open = async index => { await click(main, 'bh:' + tickets[index]); return [...delivered].find(([, body]) => body.reply_markup?.inline_keyboard.flat().some(button => button.callback_data?.includes(':bsr:')) && body.reply_markup.inline_keyboard.flat().some(button => button.callback_data?.endsWith(':bh:' + tickets[index])))?.[0]; };
-    return { store, first, second, tickets, admin, session, delivered, requests, main, click, write, open, now: () => timestamp, advance: milliseconds => { timestamp += milliseconds; }, lostResponse: () => { uncertain = true; }, modelCalls: () => modelCalls };
+    const open = async index => { await click(main, 'bh:' + tickets[index]); return [...delivered].find(([, body]) => body.reply_markup?.inline_keyboard.flat().some(button => button.callback_data?.includes(':bsc:')) && body.reply_markup.inline_keyboard.flat().some(button => button.callback_data?.endsWith(':bh:' + tickets[index])))?.[0]; };
+    const rawClick = async (id, data) => session.process({ update_id: ++sequence, callback_query: { id: 'callback' + sequence, from: { id: actor, is_bot: false }, message: { message_id: id, chat: { id: actor, type: 'private' } }, data } });
+    return { store, first, second, tickets, admin, session, delivered, requests, main, click, rawClick, write, open, now: () => timestamp, advance: milliseconds => { timestamp += milliseconds; }, lostResponse: () => { uncertain = true; }, restoreResponse: () => { uncertain = false; }, failRead: () => { readFailure = true; }, failEdit: () => { editFailure = true; }, wrongRead: index => { wrongThread = index; }, modelCalls: () => modelCalls };
 }
 
 test('native Telegram replies stay bound to distinct customer cards while the main menu and other card remain intact', async () => {
@@ -63,7 +65,7 @@ test('native Telegram replies stay bound to distinct customer cards while the ma
         assert.equal(JSON.stringify(state.delivered.get(secondCard)), otherCard);
         assert.equal(state.store.openSupport(state.first), state.tickets[0]);
         const count = state.requests.length; await state.session.process(update); assert.equal(state.requests.length, count);
-        await state.click(secondCard, 'answer');
+        await state.click(secondCard, 'bh:' + state.tickets[1]);
         await state.write('Теперь второму клиенту');
         assert.equal(state.store.supportHistory(state.second).at(-1).text, 'Теперь второму клиенту');
         assert.equal(state.modelCalls(), 0);
@@ -78,9 +80,9 @@ test('native support rejects foreign, forwarded, unknown, expired and cancelled 
         await state.write('Не чужому', card, { from: { id: actor + 1, is_bot: false } });
         await state.write('Пересланное', card, { forward_origin: { type: 'hidden_user' } });
         await state.write('Неизвестная карточка', 999999);
-        await state.click(card, 'answer'); await state.write('/cancel');
+        await state.click(card, 'bh:' + state.tickets[0]); await state.write('/cancel');
         assert.equal(state.requests.filter(item => item.path === '/support-message').length, 0);
-        await state.click(card, 'answer'); state.advance(180001); await state.write('Истёкший ввод');
+        await state.click(card, 'bh:' + state.tickets[0]); state.advance(1800001); await state.write('Истёкший ввод');
         state.advance(1800001); await state.write('Старая карточка', card);
         assert.equal(state.requests.filter(item => item.path === '/support-message').length, 0);
         assert.equal(state.modelCalls(), 0); assert.equal(state.store.supportHistory(state.first).length, 1);
@@ -145,5 +147,105 @@ test('basic bot mode binds delivered support cards and strips private routing me
         assert.equal(result.reason, 'TIME_LIMIT');
         assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Ответ из базового режима');
         assert.equal(state.store.supportHistory(state.second).length, 1);
+    } finally { state.store.close(); }
+});
+
+test('opening a customer chat allows several plain replies and repeated reopen without answer or close buttons', async () => {
+    const state = await fixture();
+    try {
+        await state.open(0);
+        await state.write('Первое обычное сообщение');
+        await state.write('Второе обычное сообщение');
+        await state.write('Третье обычное сообщение');
+        assert.deepEqual(state.store.supportHistory(state.first).slice(-3).map(item => item.text), ['Первое обычное сообщение', 'Второе обычное сообщение', 'Третье обычное сообщение']);
+        assert.equal(state.modelCalls(), 0); assert.equal(state.store.openSupport(state.first), state.tickets[0]);
+        await state.open(0); await state.write('После повторного открытия');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'После повторного открытия');
+        assert.equal(state.store.supportHistory(state.second).length, 1);
+    } finally { state.store.close(); }
+});
+
+test('a refresh click queued before a reply still reopens that same customer card after delivery', async () => {
+    const state = await fixture();
+    try {
+        const card = await state.open(0);
+        const refresh = state.delivered.get(card).reply_markup.inline_keyboard.flat().find(button => button.callback_data?.endsWith(':bh:' + state.tickets[0])).callback_data;
+        await state.write('Сообщение из Telegram Reply', card);
+        const reads = state.requests.filter(item => item.path === '/support/' + state.tickets[0]).length;
+        await state.rawClick(card, refresh);
+        assert.equal(state.requests.filter(item => item.path === '/support/' + state.tickets[0]).length, reads + 1);
+        assert.equal(state.modelCalls(), 0);
+    } finally { state.store.close(); }
+});
+
+test('leaving, resuming, switching customers and renewing the idle timer preserve one explicit recipient', async () => {
+    const state = await fixture();
+    try {
+        const firstCard = await state.open(0);
+        await state.write('До выхода');
+        await state.click(firstCard, 'bsl:' + state.tickets[0]);
+        assert.equal(state.store.openSupport(state.first), state.tickets[0]);
+        assert.ok(state.delivered.get(firstCard).reply_markup.inline_keyboard.flat().some(button => button.callback_data?.includes(':bsr:')));
+        await state.click(firstCard, 'answer'); await state.write('После возврата');
+        state.advance(20 * 60000); await state.write('Продолжаем через двадцать минут');
+        state.advance(20 * 60000); await state.write('Таймер обновлён предыдущим ответом');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Таймер обновлён предыдущим ответом');
+        await state.open(1); await state.write('Только второму');
+        assert.equal(state.store.supportHistory(state.second).at(-1).text, 'Только второму');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Таймер обновлён предыдущим ответом');
+        assert.equal(state.modelCalls(), 0);
+    } finally { state.store.close(); }
+});
+
+test('unknown delivery pauses additional text until refresh and a temporary read failure recovers in place', async () => {
+    const state = await fixture();
+    try {
+        const card = await state.open(0); state.lostResponse();
+        await state.write('Неясная доставка'); await state.write('Не повторять до проверки');
+        assert.equal(state.requests.filter(item => item.path === '/support-message').length, 1);
+        state.restoreResponse(); state.failRead(); await state.click(card, 'bh:' + state.tickets[0]);
+        await state.write('Чтение ещё не подтверждено');
+        assert.equal(state.requests.filter(item => item.path === '/support-message').length, 1);
+        await state.click(card, 'bh:' + state.tickets[0]); await state.write('Продолжение после восстановления');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Продолжение после восстановления');
+        state.failRead(); await state.write('Ответ подтверждён, чтение временно не работает');
+        await state.write('Можно продолжить после подтверждённого ответа');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Можно продолжить после подтверждённого ответа');
+        assert.equal(state.requests.filter(item => item.path === '/support-message').length, 4);
+        assert.equal(state.store.openSupport(state.first), state.tickets[0]);
+        assert.equal(state.modelCalls(), 0);
+    } finally { state.store.close(); }
+});
+
+test('Telegram edit failure after a delivered answer does not invalidate refresh or route the next answer to AI', async () => {
+    const state = await fixture();
+    try {
+        const card = await state.open(0);
+        const refresh = state.delivered.get(card).reply_markup.inline_keyboard.flat().find(button => button.callback_data?.endsWith(':bh:' + state.tickets[0])).callback_data;
+        state.failEdit();
+        await assert.rejects(state.write('Доставлено при сбое карточки'), error => error.code === 'NETWORK_FAILED');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Доставлено при сбое карточки');
+        await state.rawClick(card, refresh); await state.write('Следующее сообщение работает');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Следующее сообщение работает');
+        assert.equal(state.modelCalls(), 0);
+        assert.equal(state.requests.filter(item => item.path === '/support-message').length, 2);
+    } finally { state.store.close(); }
+});
+
+test('a mismatched thread response cannot silently select another customer for consecutive messages', async () => {
+    const state = await fixture();
+    try {
+        const card = await state.open(0); state.wrongRead(1);
+        await state.write('Первому несмотря на неверный ответ чтения');
+        await state.write('Следующее сообщение тоже первому');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Следующее сообщение тоже первому');
+        assert.equal(state.store.supportHistory(state.second).length, 1);
+        state.wrongRead(1); await state.click(card, 'bh:' + state.tickets[0]);
+        const sent = state.requests.filter(item => item.path === '/support-message').length;
+        await state.write('Не отправлять при неподтверждённом получателе');
+        assert.equal(state.requests.filter(item => item.path === '/support-message').length, sent);
+        await state.click(card, 'bh:' + state.tickets[0]); await state.write('Восстановили первого');
+        assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Восстановили первого');
+        assert.equal(state.store.supportHistory(state.second).length, 1); assert.equal(state.modelCalls(), 0);
     } finally { state.store.close(); }
 });
