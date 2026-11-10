@@ -2,14 +2,30 @@
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Личный кабинет</title>
 <style nonce="__NONCE__">:root{color-scheme:dark;font:16px system-ui;background:#101925;color:#e9f1fc}body{max-width:800px;margin:5vh auto;padding:20px}section{background:#182638;border:1px solid #344458;border-radius:18px;padding:24px;margin:20px 0}h1{font-size:30px}h2{font-size:21px}input,textarea,select,button{font:inherit;border-radius:9px;padding:12px;border:1px solid #465970;box-sizing:border-box}input,textarea{width:100%;margin:8px 0;background:#101925;color:inherit}button{background:#aecfff;color:#102038;cursor:pointer;margin:8px 8px 0 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#c9d8eb}small{color:#a9bad0}.hidden{display:none}</style></head>
 <body><h1>Личный кабинет</h1><small>Подписка, баланс и поддержка — без Telegram.</small><section id="login"><h2>Вход по почте</h2><form id="loginForm"><label>Почта<input id="email" type="email" autocomplete="username" required></label><label>Пароль<input id="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required></label><button>Войти</button></form><small>Первый доступ выдаёт администратор. Самостоятельной регистрации и проверки почты пока нет.</small></section>
-<main id="account" class="hidden"><section><h2>Ваш аккаунт</h2><pre id="details"></pre><button id="subscription">Проверить подписку</button><button id="renew">Запросить продление</button><button id="logout">Выйти</button><pre id="subscriptionDetails"></pre><h2>Заявки продления</h2><pre id="renewals"></pre><small>При неопределённом результате резерв сохраняется до ручной сверки. Повторного продления и автоматического возврата нет.</small></section>
-<section><h2>Пополнение баланса</h2><p>Поступление проверяет администратор. Заявка сама по себе не зачисляет деньги.</p><form id="paymentForm"><select id="currency"><option>RUB</option><option>USDT</option></select><input id="amount" inputmode="decimal" placeholder="Сумма" required><button>Создать заявку</button></form><pre id="payments"></pre></section>
+<main id="account" class="hidden"><section><h2>Ваш аккаунт</h2><pre id="details"></pre><button id="subscription" class="hidden">Проверить подписку</button><button id="logout">Выйти</button><pre id="subscriptionDetails"></pre></section>
+<section id="renewalSection" class="hidden"><h2>Продление подписки</h2><p>Выберите тариф. Заявку проверит администратор перед продлением и списанием баланса.</p><label>Тариф <select id="renewalPlan" aria-label="Тариф продления"></select></label><p id="planDetails"></p><button id="renew" disabled>Подать заявку на продление</button><h2>Ваши заявки</h2><pre id="renewals"></pre><small>Если результат ещё проверяется, дождитесь ответа администратора.</small></section>
+<section id="paymentSection" class="hidden"><h2>Пополнение баланса</h2><p>Поступление проверяет администратор. Заявка сама по себе не зачисляет деньги.</p><form id="paymentForm"><label>Валюта <select id="currency"><option>RUB</option><option>USDT</option></select></label><label>Сумма<input id="amount" inputmode="decimal" placeholder="Сумма" required></label><button>Создать заявку</button></form><pre id="payments"></pre></section>
 <section><h2>Поддержка</h2><p>Не отправляйте пароли, токены и ссылки подписки. История доступна только вашему аккаунту.</p><pre id="history"></pre><form id="supportForm"><textarea id="question" maxlength="500" required placeholder="Приложение, система и описание проблемы"></textarea><button>Отправить</button></form><div id="sources"></div><form id="mediaForm" class="hidden"><p>Если обращение передано администратору, можно приложить скриншот или короткое MP4 до 30 секунд. Скройте секреты заранее. Файл обрабатывается локально и удаляется; модели может передаваться только очищенный текст.</p><input id="mediaFile" type="file" accept="image/png,image/jpeg,video/mp4" required><button>Приложить к обращению</button></form><button id="erase">Удалить историю</button></section></main><pre id="status" role="status"></pre>
 <section id="guideSection" class="hidden"><h2>Иллюстрации подключения</h2><button id="showGuides">Открыть проверенные инструкции</button><div id="guideImages"></div></section>
 <style nonce="__NONCE__">#guideImages img{max-width:100%;border-radius:12px}#sources a{color:#aecfff}</style>
 <script nonce="__NONCE__">
-let csrf;
+let csrf; let plans = []; let busy = false;
 const element = id => document.getElementById(id);
+const money = (units, currency) => (units / (currency === 'RUB' ? 100 : 1000000)).toLocaleString('ru-RU', { minimumFractionDigits: currency === 'RUB' ? 2 : 0, maximumFractionDigits: currency === 'RUB' ? 2 : 6 }) + ' ' + currency;
+const states = { pending: 'Ожидает проверки', executing: 'Выполняется', uncertain: 'Проверяется администратором', approved: 'Зачислено', rejected: 'Отклонено', done: 'Выполнено', refunded: 'Возвращено' };
+const errors = { LOGIN_FAILED: 'Проверьте почту и пароль. После нескольких ошибок подождите 15 минут.', SESSION_EXPIRED: 'Войдите заново: время сеанса истекло.', PAYMENT_PENDING: 'Заявка на оплату уже ожидает проверки.', RENEWAL_PENDING: 'Заявка на продление уже обрабатывается.', RENEWAL_PLAN_UNAVAILABLE: 'Тариф пока недоступен.', RENEWAL_PLAN_CHANGED: 'Тариф изменился. Обновите страницу и проверьте цену.', INSUFFICIENT_BALANCE: 'На балансе недостаточно средств для выбранного тарифа.', INVALID_PAYMENT: 'Проверьте валюту и сумму. Для RUB — до двух знаков после точки, для USDT — до шести.', SUPPORT_RATE_LIMIT: 'Подождите минуту перед следующим обращением.', PANEL_UNAVAILABLE: 'Сведения о подписке сейчас недоступны.', MEDIA_CONTEXT_REQUIRED: 'Сначала опишите проблему в поддержке.', MEDIA_REJECTED: 'Проверьте формат и размер вложения.', MEDIA_UNAVAILABLE: 'Обработка вложений сейчас недоступна.' };
+function selectPlan() {
+    const plan = plans.find(value => value.currency === element('renewalPlan').value);
+    element('planDetails').textContent = plan ? 'Продление на ' + plan.days + ' дн. · ' + money(plan.units, plan.currency) : csrf ? 'Тарифы ещё не настроены. Обратитесь к администратору.' : '';
+    element('renew').disabled = busy || !plan;
+}
+function signedOut() {
+    csrf = undefined; plans = [];
+    element('account').classList.add('hidden'); element('guideSection').classList.add('hidden'); element('login').classList.remove('hidden');
+    for (const id of ['details', 'history', 'payments', 'renewals', 'subscriptionDetails', 'sources', 'guideImages', 'planDetails']) element(id).replaceChildren();
+    for (const id of ['question', 'mediaFile', 'amount', 'password']) element(id).value = '';
+    element('renewalPlan').replaceChildren();
+}
 async function api(path, body) {
     const response = await fetch('/api/' + path, { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf ?? '' }, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin' });
     const data = await response.json();
@@ -20,21 +36,39 @@ async function refresh() {
     const data = await api('account'); csrf = data.csrf;
     element('login').classList.add('hidden'); element('account').classList.remove('hidden');
     element('mediaForm').classList.toggle('hidden', !data.features.media);
+    element('paymentSection').classList.toggle('hidden', !data.features.billing);
+    element('renewalSection').classList.toggle('hidden', !data.features.billing);
+    element('subscription').classList.toggle('hidden', !data.features.panel);
+    plans = data.plans ?? [];
+    const selected = element('renewalPlan').value;
+    element('renewalPlan').replaceChildren();
+    for (const plan of plans) { const option = document.createElement('option'); option.value = plan.currency; option.textContent = plan.days + ' дн. — ' + money(plan.units, plan.currency); element('renewalPlan').append(option); }
+    if (plans.some(value => value.currency === selected)) element('renewalPlan').value = selected;
+    selectPlan();
     element('guideSection').classList.remove('hidden');
     element('details').textContent = data.email + '\nRUB: ' + (data.balances.RUB / 100).toFixed(2) + '\nUSDT: ' + (data.balances.USDT / 1000000).toFixed(6);
     element('history').textContent = data.history.map(item => (item.role === 'user' ? 'Вы: ' : 'Поддержка: ') + item.text).join('\n\n');
-    element('payments').textContent = data.payments.map(item => item.id + ' · ' + item.currency + ' · ' + (item.units / (item.currency === 'RUB' ? 100 : 1000000)) + ' · ' + item.state).join('\n');
-    element('renewals').textContent = (data.renewals ?? []).map(item => item.id + ' · ' + item.days + ' дн. · ' + item.state).join('\n');
+    element('payments').textContent = data.payments.map(item => item.id + ' · ' + money(item.units, item.currency) + ' · ' + (states[item.state] ?? 'Проверяется')).join('\n') || 'Заявок пока нет.';
+    element('renewals').textContent = (data.renewals ?? []).map(item => item.id + ' · ' + item.days + ' дн. · ' + money(item.units, item.currency) + ' · ' + (states[item.state] ?? 'Проверяется')).join('\n') || 'Заявок пока нет.';
 }
-async function perform(work) { try { element('status').textContent = ''; await work(); } catch (error) { element('status').textContent = 'Недоступно: ' + error.message; } }
+async function perform(work) {
+    if (busy) return;
+    busy = true; document.body.setAttribute('aria-busy', 'true');
+    const buttons = [...document.querySelectorAll('button')].map(button => [button, button.disabled]);
+    for (const [button] of buttons) button.disabled = true;
+    try { element('status').textContent = ''; await work(); }
+    catch (error) { if (error.message === 'SESSION_EXPIRED') signedOut(); element('status').textContent = errors[error.message] ?? 'Запрос не завершён. Обновите страницу и проверьте историю заявок перед повтором.'; }
+    finally { busy = false; document.body.removeAttribute('aria-busy'); for (const [button, disabled] of buttons) button.disabled = disabled; selectPlan(); }
+}
 element('loginForm').onsubmit = event => { event.preventDefault(); perform(async () => { await api('login', { email: element('email').value, password: element('password').value }); element('password').value = ''; await refresh(); }); };
 element('paymentForm').onsubmit = event => { event.preventDefault(); perform(async () => { await api('payments', { currency: element('currency').value, amount: element('amount').value }); await refresh(); }); };
 element('supportForm').onsubmit = event => { event.preventDefault(); perform(async () => { const data = await api('support', { question: element('question').value }); element('question').value = ''; await refresh(); element('status').textContent = data.reply; element('sources').replaceChildren(); for (const source of data.sources ?? []) { const url = new URL(source.url); if (url.protocol !== 'https:') continue; const link = document.createElement('a'); link.href = url.href; link.textContent = source.title; link.target = '_blank'; link.rel = 'noopener noreferrer'; element('sources').append(link, document.createElement('br')); } }); };
 element('mediaForm').onsubmit = event => { event.preventDefault(); perform(async () => { const file = element('mediaFile').files[0]; if (!file || file.size > 10485760) throw new Error('MEDIA_REJECTED'); await api('allow-media', {}); const response = await fetch('/api/media', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': file.type, 'X-CSRF-Token': csrf }, body: file }); const data = await response.json(); if (!response.ok) throw new Error(data.code); element('mediaFile').value = ''; await refresh(); element('status').textContent = data.reply; }); };
 element('subscription').onclick = () => perform(async () => { const data = await api('subscription'); element('subscriptionDetails').textContent = 'Статус: ' + data.status + '\nДо: ' + data.expireAt + '\nПроверено: ' + data.observedAt; });
-element('renew').onclick = () => perform(async () => { const data = await api('renewal', { currency: element('currency').value }); await refresh(); element('status').textContent = data.note; });
+element('renewalPlan').onchange = selectPlan;
+element('renew').onclick = () => perform(async () => { const plan = plans.find(value => value.currency === element('renewalPlan').value); if (!plan) throw new Error('RENEWAL_PLAN_UNAVAILABLE'); const data = await api('renewal', { currency: plan.currency, units: plan.units, days: plan.days }); await refresh(); element('status').textContent = data.note; });
 element('logout').onclick = () => perform(async () => { await api('logout', {}); location.reload(); });
 element('erase').onclick = () => perform(async () => { await api('erase-history', {}); await refresh(); });
 element('showGuides').onclick = () => perform(async () => { const values = await api('guides'); element('guideImages').replaceChildren(); if (!values.length) element('guideImages').textContent = 'Проверенные иллюстрации ещё не добавлены.'; for (const value of values) { const figure = document.createElement('figure'); const image = document.createElement('img'); image.src = '/api/guides/' + encodeURIComponent(value.id); image.loading = 'lazy'; image.alt = value.title; const caption = document.createElement('figcaption'); caption.textContent = value.title; figure.append(image, caption); element('guideImages').append(figure); } });
-refresh().catch(() => {});
+refresh().catch(() => { signedOut(); });
 </script></body></html>

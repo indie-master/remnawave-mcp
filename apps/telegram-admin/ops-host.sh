@@ -18,7 +18,7 @@ help_text() {
         '  extensions              nano: дополнительные выключенные модули' \
         '  backup                  остановить проект и сохранить состояние без токенов/auth' \
         '  restore BACKUP_ID       восстановить доверенный снимок только в пустое состояние' \
-        '  business settings|build|start|stop|status|account отдельный кабинет' \
+        '  business settings|check|build|start|stop|status|logs|account отдельный кабинет' \
         '  voice build|start|stop|status отдельное локальное распознавание' \
         '  media build|start|stop|status отдельный локальный OCR' \
         '  apply-all               применить ядро и выбранные env-модули' \
@@ -291,6 +291,10 @@ optional_service() {
         [[ "$details" == "$service|$directory" ]] || fail 'Дополнительный проект принадлежит другой папке.'
     done
     if [[ "$action" == status ]]; then docker_local ps -a --filter "label=com.docker.compose.project=$project" --format 'table {{.Names}}\t{{.Status}}'; return; fi
+    if [[ "$kind" == business && "$action" == logs ]]; then
+        [[ -n "$ids" ]] || fail 'Кабинет ещё не создан.'
+        docker_local logs --tail 40 "$ids"; return
+    fi
     if [[ "$action" == stop ]]; then for identifier in $ids; do docker_local stop --time 45 "$identifier" >/dev/null; done; return; fi
     if [[ "$kind" == business && "$action" == settings ]]; then
         local business_draft
@@ -308,8 +312,16 @@ optional_service() {
         [[ $(sed -n '/^SEARCH_ENABLED=true$/p' "$directory/.env") != SEARCH_ENABLED=true ]] || arguments+=(-f "$directory/compose.search.yaml")
     fi
     case "$action" in
+        check) docker_local compose "${arguments[@]}" config --quiet; printf 'Настройки кабинета проверены. Контейнеры не менялись.\n' ;;
         build) docker_local compose "${arguments[@]}" build ;;
-        start) docker_local compose "${arguments[@]}" config --quiet; docker_local compose "${arguments[@]}" up -d --no-build --no-deps "$service" ;;
+        start)
+            docker_local compose "${arguments[@]}" config --quiet
+            if [[ "$kind" == business ]]; then
+                [[ $(sed -n '/^PORTAL_ENABLED=true$/p' "$directory/.env") == PORTAL_ENABLED=true ]] || fail 'Сначала включите PORTAL_ENABLED через business settings.'
+                docker_local compose "${arguments[@]}" up -d --no-build --no-deps --wait --wait-timeout 60 "$service" || return
+                printf 'Кабинет healthy. Доступ с VPS: только 127.0.0.1:8787.\n'
+            else docker_local compose "${arguments[@]}" up -d --no-build --no-deps "$service"; fi
+            ;;
         account) [[ "$kind" == business && -n "$ids" ]] || fail 'Нужен запущенный кабинет.'; docker_local exec -it "$ids" node /app/apps/business/account-cli.mjs ;;
         *) fail 'Неизвестная операция дополнительного сервиса.' ;;
     esac
@@ -381,7 +393,7 @@ main() {
     APP=$1; shift
     local command=${1:-help}; shift || true
     [[ "$command" != help || $# != 0 ]] || { help_text; return; }
-    case "$command" in status|adopt|build|check|start|apply|apply-all|stop|stop-all|config|settings|extensions|backup|rollback) [[ $# == 0 ]] || fail 'Лишние аргументы.' ;; business) [[ $# == 1 && "$1" =~ ^(settings|build|start|stop|status|account)$ ]] || fail 'Некорректная операция business.' ;; voice|media) [[ $# == 1 && "$1" =~ ^(build|start|stop|status)$ ]] || fail 'Некорректная операция worker.' ;; restore) [[ $# == 1 && "$1" =~ ^backup\.[A-Za-z0-9]{8}$ ]] || fail 'Используйте restore BACKUP_ID.' ;; logs) [[ $# -le 1 && "${1:-bot}" =~ ^(bot|ai)$ ]] || fail 'Используйте logs bot или logs ai.' ;; token) [[ $# == 1 && "$1" =~ ^(panel|telegram|write|search)$ ]] || fail 'Используйте token panel, telegram, write или search.' ;; update) [[ $# == 1 ]] || fail 'Используйте update FULL_SHA.' ;; init) ;; *) fail 'Неизвестная команда. Используйте help.' ;; esac
+    case "$command" in status|adopt|build|check|start|apply|apply-all|stop|stop-all|config|settings|extensions|backup|rollback) [[ $# == 0 ]] || fail 'Лишние аргументы.' ;; business) [[ $# == 1 && "$1" =~ ^(settings|check|build|start|stop|status|logs|account)$ ]] || fail 'Некорректная операция business.' ;; voice|media) [[ $# == 1 && "$1" =~ ^(build|start|stop|status)$ ]] || fail 'Некорректная операция worker.' ;; restore) [[ $# == 1 && "$1" =~ ^backup\.[A-Za-z0-9]{8}$ ]] || fail 'Используйте restore BACKUP_ID.' ;; logs) [[ $# -le 1 && "${1:-bot}" =~ ^(bot|ai)$ ]] || fail 'Используйте logs bot или logs ai.' ;; token) [[ $# == 1 && "$1" =~ ^(panel|telegram|write|search)$ ]] || fail 'Используйте token panel, telegram, write или search.' ;; update) [[ $# == 1 ]] || fail 'Используйте update FULL_SHA.' ;; init) ;; *) fail 'Неизвестная команда. Используйте help.' ;; esac
     [[ "$EUID" == 0 && "$APP" != *[,\|$'\n']* ]] || fail 'Нужен root SSH-терминал и обычный путь проекта.'
     [[ $(stat -c %u "$APP") == 0 && ! -L "$APP/ops-host.sh" && $(stat -c %u "$APP/ops-host.sh") == 0 ]] || fail 'Помощник должен находиться в checkout, принадлежащем root.'
     OPS="$APP/.ops"; REPO=$(cd -- "$APP/../.." && pwd -P)

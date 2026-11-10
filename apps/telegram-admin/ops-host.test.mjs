@@ -24,25 +24,26 @@ function fixture() {
     const log = join(root, 'commands.jsonl');
     const docker = `#!/usr/bin/env node
 import fs from 'node:fs';
-import { validateBaseConfiguration, validateControlConfiguration, validateExtensionConfiguration } from ${JSON.stringify(new URL('./ops-config.mjs', import.meta.url).href)};
+import { validateBaseConfiguration, validateControlConfiguration, validateExtensionConfiguration, validateBusinessConfiguration } from ${JSON.stringify(new URL('./ops-config.mjs', import.meta.url).href)};
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.MOCK_LOG, JSON.stringify(args)+'\\n');
 if(args[0]!=='--host'||args[1]!=='unix:///var/run/docker.sock')process.exit(90);
 args.splice(0,2);
 const command=args[0];
-if(command==='ps'){if(args.some(value=>/com.docker.compose.project=panel-admin-(voice|media|business)/.test(value)))console.log('');else console.log(args.includes('-aq')?'aaaaaaaaaaaa\\nbbbbbbbbbbbb':'Synthetic project healthy');}
+if(command==='ps'){if(args.includes('label=com.docker.compose.project=panel-admin-business')&&process.env.MOCK_BUSINESS)console.log('cccccccccccc');else if(args.some(value=>/com.docker.compose.project=panel-admin-(voice|media|business)/.test(value)))console.log('');else console.log(args.includes('-aq')?'aaaaaaaaaaaa\\nbbbbbbbbbbbb':'Synthetic project healthy');}
 else if(command==='inspect'){
  const identifier=args.at(-1);const ai=identifier==='bbbbbbbbbbbb';
  const template=args[2];
  if(template==='{{.Image}}')console.log(ai?${JSON.stringify(aiImage)}:${JSON.stringify(botImage)});
  else if(template.includes('State.Status'))console.log('running|healthy');
+ else if(identifier==='cccccccccccc')console.log('portal|'+(process.env.MOCK_BUSINESS_FOREIGN?'another-directory':process.env.MOCK_REPO+'/apps/business'));
  else console.log((ai?'ai':'bot')+'|'+(process.env.MOCK_FOREIGN?'another-directory':process.env.MOCK_APP));
 }else if(command==='exec')console.log(process.env.MOCK_SETTINGS||'AI_ENABLED=true\\nBOT_ENHANCED_UI=true\\nAI_DAILY_LIMIT=100\\nPANEL_ALLOWED_REPORTS=all');
 else if(command==='run'){
  if(process.env.MOCK_VALIDATION_FAIL)process.exit(2);
  const mount=args[args.indexOf('--mount')+1];const filename=mount.match(/src=([^,]+)/)[1];
- try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else if(args.at(-2)==='extensions')validateExtensionConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
-}else if(command==='compose'){if(args.includes('build')){fs.writeFileSync(process.env.MOCK_BUILT,'true');if(process.env.MOCK_BUILD_FAIL)process.exit(2);}}
+ try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else if(args.at(-2)==='extensions')validateExtensionConfiguration(text);else if(args.at(-2)==='business')validateBusinessConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
+}else if(command==='compose'){if(args.includes('up')&&process.env.MOCK_START_FAIL)process.exit(2);if(args.includes('build')){fs.writeFileSync(process.env.MOCK_BUILT,'true');if(process.env.MOCK_BUILD_FAIL)process.exit(2);}}
 else if(command==='image'){
  const reference=args.at(-1);
  if(process.env.MOCK_IMAGE_GONE)process.exit(2);
@@ -247,4 +248,31 @@ test('external deletion of rollback references keeps pending and reports incompl
     assert.equal(readFileSync(state.env.MOCK_HEAD, 'utf8'), nextRevision);
     assert.equal(readFileSync(join(state.app, '.ops/pending'), 'utf8').trim(), nextRevision);
     assert.ok(!state.commands().some(args => args.includes('up') || args.includes('stop')));
+});
+
+test('business check is offline and disabled portal cannot start or alter the core', { skip: !hostTest }, () => {
+    const state = fixture(); const business = join(state.root, 'apps', 'business'); mkdirSync(business);
+    writeFileSync(join(business, '.env'), 'PORTAL_ENABLED=false\nPORTAL_PUBLIC_ORIGIN=http://localhost:8787\nREMNAWAVE_BASE_URL=https://panel.example.invalid\n', { mode: 0o600 });
+    assert.equal(state.run(['business', 'check']).status, 0);
+    assert.notEqual(state.run(['business', 'start']).status, 0);
+    assert.ok(state.commands().some(args => args.includes('--network') && args.includes('none') && args.at(-2) === 'business'));
+    assert.ok(!state.commands().some(args => args.includes('up') || args.includes('stop') || args.includes('exec')));
+});
+
+test('business start waits for its own health, reports failures, and logs need no private config', { skip: !hostTest }, () => {
+    const state = fixture(); const business = join(state.root, 'apps', 'business'); mkdirSync(business);
+    const envFile = join(business, '.env');
+    writeFileSync(envFile, 'PORTAL_ENABLED=true\nPORTAL_PUBLIC_ORIGIN=http://localhost:8787\nREMNAWAVE_BASE_URL=https://panel.example.invalid\n', { mode: 0o600 });
+    assert.equal(state.run(['business', 'start']).status, 0);
+    const start = state.commands().find(args => args.includes('up'));
+    assert.ok(start.includes('--wait')); assert.ok(start.includes('--no-deps')); assert.equal(start.at(-1), 'portal');
+    assert.equal(start[start.indexOf('-p') + 1], 'panel-admin-business');
+    const failure = state.run(['business', 'start'], { MOCK_START_FAIL: 'true' });
+    assert.notEqual(failure.status, 0); assert.doesNotMatch(failure.stdout, /Кабинет healthy/);
+    writeFileSync(envFile, 'INVALID=not-valid\n');
+    assert.equal(state.run(['business', 'logs'], { MOCK_BUSINESS: 'true' }).status, 0);
+    assert.deepEqual(state.commands().at(-1).slice(2), ['logs', '--tail', '40', 'cccccccccccc']);
+    const before = state.commands().length;
+    assert.notEqual(state.run(['business', 'logs'], { MOCK_BUSINESS: 'true', MOCK_BUSINESS_FOREIGN: 'true' }).status, 0);
+    assert.ok(!state.commands().slice(before).some(args => args.includes('logs') || args.includes('up') || args.includes('stop')));
 });

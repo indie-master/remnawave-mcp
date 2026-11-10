@@ -8,6 +8,10 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
     const local = publicOrigin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(publicOrigin.hostname);
     if ((!local && publicOrigin.protocol !== 'https:') || publicOrigin.pathname !== '/' || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error('INVALID_PORTAL_ORIGIN');
     const html = readFileSync(new URL('./portal.html', import.meta.url), 'utf8');
+    const availablePlans = billingEnabled ? ['RUB', 'USDT'].flatMap(currency => {
+        const plan = plans[currency];
+        return plan && Number.isSafeInteger(plan.units) && plan.units > 0 && plan.units <= 100000000000 && Number.isInteger(plan.days) && plan.days >= 1 && plan.days <= 366 ? [{ currency, units: plan.units, days: plan.days }] : [];
+    }) : [];
     let mediaBusy = false;
     const server = createServer(async (request, response) => {
         response.setHeader('Cache-Control', 'no-store'); response.setHeader('X-Content-Type-Options', 'nosniff'); response.setHeader('Referrer-Policy', 'no-referrer'); response.setHeader('X-Frame-Options', 'DENY');
@@ -54,7 +58,7 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
             const token = request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
             const session = store.session(token);
             if (request.method === 'POST' && request.headers['x-csrf-token'] !== session.csrf) throw new Error('REQUEST_REJECTED');
-            if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), renewals: store.renewals(session.account), history: store.history(session.account), features: { media: !!analyzeMedia, billing: billingEnabled } }); return; }
+            if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), renewals: store.renewals(session.account), history: store.history(session.account), plans: availablePlans, features: { media: !!analyzeMedia, billing: billingEnabled, panel: !!panelRead } }); return; }
             if (request.method === 'GET' && request.url === '/api/guides') { send(200, guides?.list() ?? []); return; }
             if (request.method === 'GET' && /^\/api\/guides\/[a-z0-9_-]{1,40}$/.test(request.url) && guides) {
                 const image = guides.image(request.url.split('/').at(-1)); response.writeHead(200, { 'Content-Type': image.type }).end(image.bytes); return;
@@ -73,13 +77,20 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
                 const units = Number(parts[0]) * 10 ** precision + Number((parts[1] ?? '').padEnd(precision, '0'));
                 send(200, store.payment(session.account, body.currency, units)); return;
             }
-            if (request.method === 'POST' && request.url === '/api/renewal' && billingEnabled) { if (Object.keys(body).join(',') !== 'currency') throw new Error('INVALID_PAYMENT'); send(200, store.requestRenewal(session.account, body.currency, plans[body.currency])); return; }
+            if (request.method === 'POST' && request.url === '/api/renewal' && billingEnabled) {
+                const keys = Object.keys(body).sort().join(',');
+                if (!['currency', 'currency,days,units'].includes(keys) || !['RUB', 'USDT'].includes(body.currency)) throw new Error('INVALID_PAYMENT');
+                const plan = availablePlans.find(value => value.currency === body.currency);
+                if (!plan) throw new Error('RENEWAL_PLAN_UNAVAILABLE');
+                if (keys !== 'currency' && (body.units !== plan.units || body.days !== plan.days)) throw new Error('RENEWAL_PLAN_CHANGED');
+                send(200, store.requestRenewal(session.account, body.currency, plan)); return;
+            }
             if (request.method === 'POST' && request.url === '/api/support') { if (Object.keys(body).join(',') !== 'question') throw new Error('INVALID_MESSAGE'); send(200, await support(session.account, body.question)); return; }
             if (request.method === 'POST' && request.url === '/api/allow-media' && analyzeMedia) { send(200, store.allowMedia(session.account)); return; }
             if (request.method === 'POST' && request.url === '/api/erase-history') { store.eraseHistory(session.account); send(200, { ok: true }); return; }
             send(404, { code: 'NOT_FOUND' });
         } catch (error) {
-            const code = ['LOGIN_FAILED', 'SESSION_EXPIRED', 'INVALID_PAYMENT', 'PAYMENT_PENDING', 'RENEWAL_PENDING', 'RENEWAL_PLAN_UNAVAILABLE', 'INSUFFICIENT_BALANCE', 'SUPPORT_RATE_LIMIT', 'INVALID_MESSAGE', 'PANEL_UNAVAILABLE', 'MEDIA_REJECTED', 'MEDIA_CONTEXT_REQUIRED', 'MEDIA_RATE_LIMIT', 'MEDIA_UNAVAILABLE'].includes(error?.message) ? error.message : 'REQUEST_REJECTED';
+            const code = ['LOGIN_FAILED', 'SESSION_EXPIRED', 'INVALID_PAYMENT', 'PAYMENT_PENDING', 'RENEWAL_PENDING', 'RENEWAL_PLAN_UNAVAILABLE', 'RENEWAL_PLAN_CHANGED', 'INSUFFICIENT_BALANCE', 'SUPPORT_RATE_LIMIT', 'INVALID_MESSAGE', 'PANEL_UNAVAILABLE', 'MEDIA_REJECTED', 'MEDIA_CONTEXT_REQUIRED', 'MEDIA_RATE_LIMIT', 'MEDIA_UNAVAILABLE'].includes(error?.message) ? error.message : 'REQUEST_REJECTED';
             send(['LOGIN_FAILED', 'SESSION_EXPIRED'].includes(code) ? 401 : 400, { code });
         }
     });

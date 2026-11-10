@@ -46,3 +46,69 @@ test('portal login/CSRF/Host/account isolation and payment workflow use only syn
         await call('/api/logout', {}, headers); assert.equal((await call('/api/account', undefined, headers)).status, 401);
     } finally { portal.closeAllConnections(); await new Promise(resolve => portal.close(resolve)); store.close(); }
 });
+
+async function portalFixture(options = {}) {
+    const store = createBusinessStore({ filename: ':memory:' });
+    const first = store.provision('pilot@example.invalid', 'synthetic-password-only', 48).id;
+    const origin = 'http://localhost:8787';
+    const server = createPortal({ store, origin, support: createSupport({ store }), ...options });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    let cookie; let csrf;
+    const close = async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); store.close(); };
+    const call = (path, body, authorized = true) => new Promise((resolve, reject) => {
+        const outgoing = request({ host: '127.0.0.1', port: server.address().port, path: '/api/' + path, method: body === undefined ? 'GET' : 'POST', agent: false, headers: { Host: 'localhost:8787', Origin: origin, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(authorized ? { Cookie: cookie, 'X-CSRF-Token': csrf } : {}) } }, incoming => {
+            let text = ''; incoming.on('data', chunk => { text += chunk; });
+            incoming.on('end', () => { try { resolve({ status: incoming.statusCode, data: JSON.parse(text), headers: incoming.headers }); } catch (error) { reject(error); } });
+        }); outgoing.on('error', reject); outgoing.end(body === undefined ? undefined : JSON.stringify(body));
+    });
+    try {
+        const login = await call('login', { email: 'pilot@example.invalid', password: 'synthetic-password-only' }, false);
+        assert.equal(login.status, 200); cookie = login.headers['set-cookie'][0].split(';')[0]; csrf = login.data.csrf;
+        return { store, first, call, close };
+    } catch (error) { await close(); throw error; }
+}
+
+test('closed portal pilot exposes enabled features only, isolates support, and cannot credit or renew', async () => {
+    const pilot = await portalFixture({ plans: { RUB: { units: 12345, days: 30 } } });
+    try {
+        const account = await pilot.call('account');
+        assert.deepEqual(account.data.features, { billing: false, media: false, panel: false });
+        assert.deepEqual(account.data.plans, []);
+        assert.equal((await pilot.call('payments', { currency: 'RUB', amount: '123.45' })).status, 404);
+        assert.equal((await pilot.call('renewal', { currency: 'RUB' })).status, 404);
+        assert.equal((await pilot.call('subscription')).data.code, 'PANEL_UNAVAILABLE');
+        assert.equal((await pilot.call('support', { question: 'Неизвестная проблема подключения' })).data.source, 'human');
+        assert.equal(pilot.store.pendingSupport().length, 1);
+        assert.deepEqual(pilot.store.account(pilot.first).balances, { RUB: 0, USDT: 0 });
+        assert.deepEqual(pilot.store.pendingPayments(), []); assert.deepEqual(pilot.store.renewals(pilot.first), []);
+        assert.equal((await pilot.call('account', undefined, false)).status, 401);
+    } finally { await pilot.close(); }
+});
+
+test('customer sees fixed RUB/USDT prices and changed or injected quotes cannot create renewal requests', async () => {
+    const pilot = await portalFixture({ billingEnabled: true, plans: { RUB: { units: 12345, days: 30 }, USDT: { units: 2500000, days: 30 } }, panelRead: async id => ({ id }) });
+    try {
+        const account = await pilot.call('account');
+        assert.equal(account.data.features.panel, true);
+        assert.deepEqual(account.data.plans, [{ currency: 'RUB', units: 12345, days: 30 }, { currency: 'USDT', units: 2500000, days: 30 }]);
+        const deposit = pilot.store.payment(pilot.first, 'RUB', 12345); pilot.store.approvePayment(deposit.id, 'test:pilot-rub');
+        for (const body of [{ currency: 'RUB', units: 1, days: 30 }, { currency: 'RUB', units: 12345, days: 1 }, { currency: 'RUB', units: '12345', days: 30 }, { currency: 'USDT', units: 2500000, days: 31 }]) assert.equal((await pilot.call('renewal', body)).data.code, 'RENEWAL_PLAN_CHANGED');
+        for (const body of [{ currency: 'RUB', days: 30 }, { currency: 'RUB', units: 12345, days: 30, account: 'other' }, { currency: '__proto__' }]) assert.equal((await pilot.call('renewal', body)).status, 400);
+        assert.deepEqual(pilot.store.renewals(pilot.first), []);
+        assert.equal((await pilot.call('renewal', account.data.plans[0])).status, 200);
+        assert.equal(pilot.store.renewals(pilot.first)[0].state, 'pending');
+        assert.equal(pilot.store.account(pilot.first).balances.RUB, 12345);
+        assert.equal((await pilot.call('renewal', account.data.plans[0])).data.code, 'RENEWAL_PENDING');
+    } finally { await pilot.close(); }
+});
+
+test('zero price remains unavailable and legacy currency-only renewal requests remain compatible', async () => {
+    const pilot = await portalFixture({ billingEnabled: true, plans: { RUB: { units: 0, days: 30 }, USDT: { units: 1000000, days: 7 } } });
+    try {
+        assert.deepEqual((await pilot.call('account')).data.plans, [{ currency: 'USDT', units: 1000000, days: 7 }]);
+        assert.equal((await pilot.call('renewal', { currency: 'RUB' })).data.code, 'RENEWAL_PLAN_UNAVAILABLE');
+        const deposit = pilot.store.payment(pilot.first, 'USDT', 1000000); pilot.store.approvePayment(deposit.id, 'test:pilot-usdt');
+        assert.equal((await pilot.call('renewal', { currency: 'USDT' })).status, 200);
+        assert.equal(pilot.store.account(pilot.first).balances.USDT, 1000000);
+    } finally { await pilot.close(); }
+});
