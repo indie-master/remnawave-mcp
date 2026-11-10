@@ -202,8 +202,8 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
         supportThread(id) {
             const row = database.prepare('SELECT handoff.account,account.panel_id FROM handoffs handoff JOIN accounts account ON account.id=handoff.account WHERE handoff.id=? AND handoff.state=?').get(id, 'pending');
             if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-            const latest = database.prepare('SELECT coalesce(max(id),0) AS value FROM messages WHERE account=?').get(row.account).value;
-            return { id, panelId: row.panel_id, version: hash(row.account + ':' + latest).slice(0, 24), history: api.history(row.account), media: database.prepare('SELECT id,text FROM media_reviews WHERE account=? AND state=? ORDER BY created LIMIT 5').all(row.account, 'pending') };
+            const latest = database.prepare('SELECT id,role,text,created FROM messages WHERE account=? ORDER BY id DESC LIMIT 1').get(row.account);
+            return { id, panelId: row.panel_id, version: hash(row.account + ':' + JSON.stringify(latest ?? null)).slice(0, 24), history: api.history(row.account), media: database.prepare('SELECT id,text FROM media_reviews WHERE account=? AND state=? ORDER BY created LIMIT 5').all(row.account, 'pending') };
         },
         supportMessage(id, key, text) {
             if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id) || typeof key !== 'string' || !/^[a-f0-9]{32}$/.test(key) || typeof text !== 'string' || !text.trim() || text.length > 500) throw new Error('INVALID_MESSAGE');

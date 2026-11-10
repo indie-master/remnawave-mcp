@@ -76,3 +76,15 @@ test('customer chat history is broader than AI context and stays bounded and acc
         store.eraseHistory(first); assert.deepEqual(store.supportHistory(first), []);
     } finally { store.close(); }
 });
+
+test('clearing customer history cannot make an old close button valid for a new message with a reused SQLite row ID', () => {
+    const { store, first } = fixture();
+    try {
+        store.append(first, 'user', 'Первоначальный вопрос'); const id = store.handoff(first);
+        const old = store.supportThread(id).version;
+        store.eraseHistory(first); store.append(first, 'user', 'Новый вопрос после удаления истории');
+        assert.notEqual(store.supportThread(id).version, old);
+        assert.throws(() => store.closeSupport(id, old), /CHANGED/);
+        assert.equal(store.openSupport(first), id);
+    } finally { store.close(); }
+});
