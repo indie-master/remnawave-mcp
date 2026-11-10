@@ -39,7 +39,7 @@ test('renewal buttons only prepare a preview; an explicit one-use confirmation p
     const state = fixture();
     try {
         const choices = await state.send('', 'ar:42');
-        assert.deepEqual(choices.reply_markup.inline_keyboard[0], [{ text: '+7 дн.', callback_data: 'ap:42:7' }]);
+        assert.deepEqual(choices.reply_markup.inline_keyboard[0], [{ text: '+7 дн.', callback_data: 'ap:42:7' }, { text: '+30 дн.', callback_data: 'ap:42:30' }]);
         assert.match((await state.send('', 'ap:42:365')).text, /Запрос изменения к панели не отправлялся/);
         assert.deepEqual(state.counts(), { reads: 0, writes: 0 });
         const preview = await state.send('', 'ap:42:30');
@@ -50,7 +50,7 @@ test('renewal buttons only prepare a preview; an explicit one-use confirmation p
         assert.match((await state.send('', key)).text, /устарело/);
         assert.equal(state.counts().writes, 1);
         const history = await state.send('', 'admin_operations');
-        assert.match(history.text, /done/);
+        assert.match(history.text, /Выполнено/);
         assert.ok(!history.text.includes('private-synthetic'));
     } finally { state.administration.close(); }
 });

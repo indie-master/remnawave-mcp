@@ -18,7 +18,7 @@ export function createMenuSession({ api, handle, allowedUserId, collapsible = fa
         if (!/^[A-Za-z0-9_-]{8}$/.test(nextToken)) throw new Error('INVALID_MENU_TOKEN');
         if (!collapsed) expandedPayload = payload;
         const rows = collapsed ? [[{ text: '🏠 Открыть меню', callback_data: 'ui_expand' }]] : [...(payload.reply_markup?.inline_keyboard ?? []), ...(collapsible ? [[{ text: '➖ Свернуть', callback_data: 'ui_collapse' }]] : [])];
-        const markup = rows.length ? { inline_keyboard: rows.map(row => row.map(button => ({ ...button, callback_data: `m:${nextToken}:${button.callback_data}` }))) } : undefined;
+        const markup = rows.length ? { inline_keyboard: rows.map(row => row.map(button => button.callback_data === undefined ? { ...button } : { ...button, callback_data: `m:${nextToken}:${button.callback_data}` })) } : undefined;
         const output = { ...payload, ...(markup ? { reply_markup: markup } : {}) };
         if (edit && anchor !== undefined) {
             try { await api.editReply({ ...output, message_id: anchor }); token = nextToken; return 1; }

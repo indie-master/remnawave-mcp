@@ -1,6 +1,4 @@
-const bytes = value => {
-    return `${(value / 1073741824).toFixed(2)} ГБ`;
-};
+import { formatTraffic as bytes } from './admin-display.mjs';
 const states = { online: '🟢 Онлайн', offline: '🔴 Офлайн', disabled: '⚪ Отключена', connecting: '🟡 Подключается' };
 
 export function extraView(action, report, page = 0) {

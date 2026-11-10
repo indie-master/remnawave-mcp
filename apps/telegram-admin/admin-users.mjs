@@ -1,17 +1,23 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, statSync } from 'node:fs';
-import { GetUserByIdCommand, GetUserByUsernameCommand, UpdateUserCommand } from '@remnawave/backend-contract';
+import { CreateUserCommand, GetUserByIdCommand, GetUserByUsernameCommand, UpdateUserCommand } from '@remnawave/backend-contract';
+import { createUserWizard } from './admin-create.mjs';
 import { RemnawaveClient } from '../../dist/client.js';
 import { createPanelActions, directoryPageSize, nodeChange, nodeUuidPattern, positiveId } from './admin-panel-actions.mjs';
+import { addMoscowMonths, calendarExpiry, calendarMonth, formatLimit, formatTraffic, moscowDate as moscow, parseGigabytes, statusLabels, trafficStrategies } from './admin-display.mjs';
 
-export const editableFields = ['status', 'expireAt', 'description', 'email', 'telegramId', 'trafficLimitBytes', 'tag', 'hwidDeviceLimit'];
+export const editableFields = ['status', 'expireAt', 'description', 'email', 'telegramId', 'trafficLimitBytes', 'tag', 'hwidDeviceLimit', 'trafficLimitStrategy'];
 const numericId = value => /^\d{1,16}$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 const reference = value => typeof value === 'string' && (numericId(value) || /^[A-Za-z0-9_-]{3,36}$/.test(value));
 const hash = values => createHash('sha256').update(JSON.stringify(values)).digest('hex');
-const digest = (target, operation) => operation === 'node-edit'
-    ? hash([target.uuid, target.name, target.note, target.updatedAt])
-    : hash([target.id, ...editableFields.map(field => target[field] ?? null), ...(operation === 'revoke' ? [target.shortUuid, target.subRevokedAt] : [])]);
+function digest(target, operation, changes = {}) {
+    if (operation === 'node-edit') return hash([target.uuid, target.name, target.note, target.updatedAt]);
+    const fields = Object.hasOwn(changes, 'trafficLimitStrategy') ? editableFields : editableFields.filter(field => field !== 'trafficLimitStrategy');
+    const revoke = operation === 'revoke' ? [target.shortUuid, target.subRevokedAt] : [];
+    const reset = operation === 'traffic-reset' ? [target.lastTrafficResetAt, target.trafficLimitStrategy] : [];
+    return hash([target.id, ...fields.map(field => target[field] ?? null), ...revoke, ...reset]);
+}
 
 function parseUserPatch(body) {
     try { return UpdateUserCommand.RequestBodySchema.parse(body); }
@@ -34,11 +40,17 @@ export function createUserClient({ baseUrl, readTokenFile, writeTokenFile = '/ru
             const command = numericId(ref) ? GetUserByIdCommand : GetUserByUsernameCommand;
             return client(readTokenFile).request('GET', command.url(numericId(ref) ? Number(ref) : ref));
         },
-        async patch(body) { return client(writeTokenFile).request('PATCH', UpdateUserCommand.url, undefined, parseUserPatch(body)); },
+        async patch(body) {
+            const validated = parseUserPatch(body);
+            const result = await client(writeTokenFile).request('PATCH', UpdateUserCommand.url, undefined, validated);
+            const confirmed = result?.id === body.id && Object.entries(validated).every(([field, value]) => result[field] === (value instanceof Date ? value.toISOString() : value));
+            if (!confirmed) throw new Error('ADMIN_RESULT_UNCERTAIN');
+            return result;
+        },
     };
 }
 
-export function createUserAdministration({ filename, client, actorId, readEnabled = false, writeEnabled = false, allowedFields = ['status', 'expireAt', 'description'], actionUserIds = [], actionNodeUuids = [], nodesEnabled = true, now = Date.now }) {
+export function createUserAdministration({ filename, client, actorId, readEnabled = false, writeEnabled = false, allowedFields = ['status', 'expireAt', 'description'], actionUserIds = [], actionNodeUuids = [], destructiveUserActions = false, createOptions = { enabled: false }, nodesEnabled = true, now = Date.now }) {
     if (!Number.isSafeInteger(actorId) || actorId <= 0 || !Array.isArray(allowedFields) || !allowedFields.length || new Set(allowedFields).size !== allowedFields.length || allowedFields.some(field => !editableFields.includes(field)) || (writeEnabled && !readEnabled)) throw new Error('ADMIN_CONFIGURATION_INVALID');
     const database = new DatabaseSync(filename);
     database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=2000; CREATE TABLE IF NOT EXISTS confirmations (id TEXT PRIMARY KEY, actor INTEGER NOT NULL, target TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, baseline TEXT NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, action TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL);');
@@ -55,12 +67,12 @@ export function createUserAdministration({ filename, client, actorId, readEnable
     }
     function ticket(target, operation, payload) {
         const reference = operation === 'node-edit' ? target.uuid : target.id;
-        database.prepare('DELETE FROM confirmations WHERE expires < ? AND state != ?').run(now() - 86400000, 'executing');
+        database.prepare("DELETE FROM confirmations WHERE expires < ? AND state NOT IN ('executing','uncertain')").run(now() - 86400000);
         database.prepare("UPDATE confirmations SET state = 'expired', payload = '{}' WHERE expires < ? AND state = 'pending'").run(now());
         if (database.prepare('SELECT count(*) AS count FROM confirmations WHERE state = ?').get('pending').count >= 50) throw new Error('ADMIN_BUSY');
         const id = randomBytes(12).toString('base64url');
-        database.prepare('INSERT INTO confirmations VALUES (?,?,?,?,?,?,?,?)').run(id, actorId, String(reference), operation, JSON.stringify(payload), digest(target, operation), now() + 180000, 'pending');
-        return { id, operation, target: reference, changes: payload, expiresInSeconds: 180, confirmationRequired: true };
+        database.prepare('INSERT INTO confirmations VALUES (?,?,?,?,?,?,?,?)').run(id, actorId, String(reference), operation, JSON.stringify(payload), digest(target, operation, payload), now() + 180000, 'pending');
+        return { id, operation, target: reference, changes: payload, ...(payload.expireAt ? { previousExpireAt: target.expireAt } : {}), expiresInSeconds: 180, confirmationRequired: true };
     }
     async function exclusive(work, category = 'legacy') {
         if (busy || (['legacy', 'connections'].includes(category) && now() - (lastRead.get(category) ?? -Infinity) < 2000)) throw new Error('ADMIN_BUSY');
@@ -68,10 +80,43 @@ export function createUserAdministration({ filename, client, actorId, readEnable
         try { return await work(); } finally { busy = false; }
     }
     const canUserAction = id => writeEnabled && actionUserIds.includes(Number(id));
+    const canDestructiveAction = id => destructiveUserActions && canUserAction(id);
     const canNodeEdit = uuid => nodesEnabled && writeEnabled && actionNodeUuids.includes(uuid);
     function checkNodes() { if (!nodesEnabled) throw new Error('REPORT_DISABLED'); }
+    async function creationSquads() {
+        if (!writeEnabled || !createOptions.enabled) throw new Error('ADMIN_CREATE_DISABLED');
+        const squads = await client.squads();
+        const permitted = squads.filter(squad => createOptions.squads.includes(squad.uuid));
+        if (!permitted.length || permitted.length !== createOptions.squads.length) throw new Error('ADMIN_CREATE_DISABLED');
+        return permitted;
+    }
+    async function assertNewUsername(username) {
+        if (database.prepare("SELECT id FROM confirmations WHERE operation='create' AND target=? AND state IN ('executing','uncertain')").get(username)) throw new Error('ADMIN_CREATE_UNCERTAIN');
+        try { await client.get(username); }
+        catch (error) { if (error?.status === 404) return; throw error; }
+        throw new Error('ADMIN_USERNAME_EXISTS');
+    }
     return {
-        canUserAction, canNodeEdit,
+        canUserAction, canNodeEdit, canDestructiveAction,
+        creationPolicy(actor) { authorize(actor); return { ...createOptions, enabled: writeEnabled && createOptions.enabled }; },
+        async creationSquads(actor) { authorize(actor); return exclusive(creationSquads, 'creation'); },
+        async prepareCreate(actor, values) {
+            authorize(actor);
+            if (!writeEnabled || !createOptions.enabled) throw new Error('ADMIN_CREATE_DISABLED');
+            if (!values || Object.keys(values).some(field => !['username', 'days', 'trafficLimitBytes', 'trafficLimitStrategy', 'hwidDeviceLimit', 'activeInternalSquads', 'telegramId'].includes(field))) throw new Error('ADMIN_INVALID_CHANGE');
+            if (!Number.isSafeInteger(values.trafficLimitBytes) || values.trafficLimitBytes < 0 || !Number.isInteger(values.hwidDeviceLimit) || values.hwidDeviceLimit < 1 || values.hwidDeviceLimit > 100 || !Object.hasOwn(trafficStrategies, values.trafficLimitStrategy)) throw new Error('ADMIN_INVALID_CHANGE');
+            if (!Number.isInteger(values.days) || values.days < 1 || values.days > 366 || !Array.isArray(values.activeInternalSquads) || !values.activeInternalSquads.length || new Set(values.activeInternalSquads).size !== values.activeInternalSquads.length || values.activeInternalSquads.some(uuid => !createOptions.squads.includes(uuid))) throw new Error('ADMIN_INVALID_CHANGE');
+            return exclusive(async () => {
+                const body = { ...values, status: 'ACTIVE', expireAt: new Date(now() + values.days * 86400000).toISOString() };
+                delete body.days;
+                const result = CreateUserCommand.RequestBodySchema.safeParse(body);
+                if (!result.success || JSON.stringify(body).length > 2048) throw new Error('ADMIN_INVALID_CHANGE');
+                const squads = await creationSquads();
+                await assertNewUsername(body.username);
+                const ticketValue = ticket({ id: body.username }, 'create', body);
+                return { ...ticketValue, squadNames: squads.filter(squad => body.activeInternalSquads.includes(squad.uuid)).map(squad => squad.name) };
+            }, 'creation');
+        },
         policy(actor) { authorize(actor); return { writeEnabled, fields: [...allowedFields] }; },
         hasInFlight(actor) { authorize(actor); return busy; },
         operations(actor) {
@@ -82,10 +127,16 @@ export function createUserAdministration({ filename, client, actorId, readEnable
             authorize(actor);
             return exclusive(async () => {
                 const user = await get(ref);
-                return { id: user.id, username: user.username, status: user.status, expireAt: user.expireAt, trafficLimitBytes: user.trafficLimitBytes, trafficUsedBytes: user.userTraffic?.usedTrafficBytes ?? null, telegramLinked: user.telegramId != null, description: typeof user.description === 'string' ? user.description.slice(0, 300) : '', hwidDeviceLimit: user.hwidDeviceLimit, observedAt: new Date(now()).toISOString() };
+                const devices = navigation === true && client.devices ? await client.devices(user.id).then(items => items.length, () => null) : null;
+                return { id: user.id, username: user.username, status: user.status, expireAt: user.expireAt,
+                    trafficLimitBytes: user.trafficLimitBytes, trafficUsedBytes: user.userTraffic?.usedTrafficBytes ?? null, trafficLimitStrategy: user.trafficLimitStrategy,
+                    telegramLinked: user.telegramId != null, telegramId: positiveId(user.telegramId) ? user.telegramId : null, lastOnlineAt: user.userTraffic?.onlineAt,
+                    description: typeof user.description === 'string' ? user.description.slice(0, 300) : '', tag: typeof user.tag === 'string' ? user.tag.slice(0, 36) : '',
+                    hwidDeviceLimit: user.hwidDeviceLimit, devices, observedAt: new Date(now()).toISOString() };
             }, navigation ? 'card' : 'legacy');
         },
-        async users(actor, page) { authorize(actor); return exclusive(() => client.users(page), 'directory'); },
+        async users(actor, page, query) { authorize(actor); return exclusive(() => client.users(page, query), 'directory'); },
+        async usersByTelegram(actor, id) { authorize(actor); return exclusive(() => client.usersByTelegram(id), 'directory'); },
         async nodes(actor) { authorize(actor); checkNodes(); return exclusive(() => client.nodes(), 'nodes'); },
         async node(actor, uuid) { authorize(actor); checkNodes(); return exclusive(() => client.node(uuid), 'node'); },
         async devices(actor, id) {
@@ -120,6 +171,13 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                     if (!device) throw new Error('ADMIN_STALE');
                     return ticket(user, operation, { selector: value, label: device.label });
                 }
+                if (['devices-clear', 'traffic-reset'].includes(operation)) {
+                    if (!canDestructiveAction(id)) throw new Error('ADMIN_ACTION_DISABLED');
+                    if (operation === 'traffic-reset') return ticket(user, operation, { usedBytes: user.userTraffic?.usedTrafficBytes ?? null });
+                    const devices = await client.devices(id);
+                    if (!devices.length) throw new Error('ADMIN_NO_CHANGE');
+                    return ticket(user, operation, { count: devices.length, fingerprint: hash(devices.map(device => device.selector).sort()) });
+                }
                 throw new Error('ADMIN_INVALID_CHANGE');
             }, 'action');
         },
@@ -133,7 +191,7 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                 return ticket(node, 'node-edit', { field, value: body[field], name: node.name });
             }, 'node-edit');
         },
-        async prepare(actor, ref, changes, extendOnly = false) {
+        async prepare(actor, ref, changes, extendOnly = false, navigation = false) {
             authorize(actor);
             if (!writeEnabled) throw new Error('ADMIN_WRITE_DISABLED');
             if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !Object.keys(changes).length || Object.keys(changes).some(field => !allowedFields.includes(field))) throw new Error('ADMIN_FIELD_DISABLED');
@@ -145,13 +203,13 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                 const validated = Object.fromEntries(Object.keys(changes).map(field => [field, body[field] instanceof Date ? body[field].toISOString() : body[field]]));
                 if (JSON.stringify(validated).length > 2048) throw new Error('ADMIN_INVALID_CHANGE');
                 return ticket(user, 'patch', validated);
-            });
+            }, navigation ? 'edit' : 'legacy');
         },
-        async prepareSubscription(actor, ref) {
+        async prepareSubscription(actor, ref, navigation = false) {
             authorize(actor);
-            return exclusive(async () => ticket(await get(ref), 'subscription', {}));
+            return exclusive(async () => ticket(await get(ref), 'subscription', {}), navigation ? 'subscription' : 'legacy');
         },
-        async prepareRenewal(actor, ref, days) {
+        async prepareRenewal(actor, ref, days, navigation = false) {
             authorize(actor);
             if (!writeEnabled || !allowedFields.includes('expireAt')) throw new Error('ADMIN_WRITE_DISABLED');
             if (!Number.isInteger(days) || days < 1 || days > 366) throw new Error('ADMIN_INVALID_CHANGE');
@@ -162,7 +220,20 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                 const expireAt = new Date(Math.max(now(), previous) + days * 86400000).toISOString();
                 parseUserPatch({ id: user.id, expireAt });
                 return ticket(user, 'patch', { expireAt });
-            });
+            }, navigation ? 'renewal' : 'legacy');
+        },
+        async prepareCalendarRenewal(actor, ref, months) {
+            authorize(actor);
+            if (!writeEnabled || !allowedFields.includes('expireAt')) throw new Error('ADMIN_WRITE_DISABLED');
+            if (![1, 2, 3, 6, 9, 12].includes(months)) throw new Error('ADMIN_INVALID_CHANGE');
+            return exclusive(async () => {
+                const user = await get(ref);
+                const previous = Date.parse(user.expireAt);
+                if (!Number.isFinite(previous)) throw new Error('ADMIN_UNAVAILABLE');
+                const expireAt = addMoscowMonths(Math.max(now(), previous), months);
+                parseUserPatch({ id: user.id, expireAt });
+                return ticket(user, 'patch', { expireAt });
+            }, 'renewal');
         },
         cancel(actor, id) {
             authorize(actor);
@@ -185,20 +256,36 @@ export function createUserAdministration({ filename, client, actorId, readEnable
             const entry = database.prepare('SELECT * FROM confirmations WHERE id = ? AND actor = ? AND state = ? AND expires >= ?').get(id, actor, 'pending', now());
             if (!entry) throw new Error('ADMIN_CONFIRMATION_EXPIRED');
             if (entry.operation === 'patch' && !writeEnabled) throw new Error('ADMIN_WRITE_DISABLED');
+            if (entry.operation === 'create' && (!writeEnabled || !createOptions.enabled)) throw new Error('ADMIN_CREATE_DISABLED');
             if ((['revoke', 'device-delete'].includes(entry.operation) && !canUserAction(entry.target)) || (entry.operation === 'node-edit' && !canNodeEdit(entry.target))) throw new Error('ADMIN_ACTION_DISABLED');
-            const claim = database.prepare('UPDATE confirmations SET state = ? WHERE id = ? AND state = ?').run('executing', id, 'pending');
+            if (['traffic-reset', 'devices-clear'].includes(entry.operation) && !canDestructiveAction(entry.target)) throw new Error('ADMIN_ACTION_DISABLED');
+            const claim = entry.operation === 'create'
+                ? database.prepare("UPDATE confirmations SET state='executing' WHERE id=? AND state='pending' AND NOT EXISTS (SELECT 1 FROM confirmations other WHERE other.operation='create' AND other.target=? AND other.id!=? AND other.state IN ('executing','uncertain'))").run(id, entry.target, id)
+                : database.prepare('UPDATE confirmations SET state = ? WHERE id = ? AND state = ?').run('executing', id, 'pending');
             if (claim.changes !== 1) throw new Error('ADMIN_CONFIRMATION_EXPIRED');
             busy = true;
             let state = 'rejected';
             try {
+                if (entry.operation === 'create') {
+                    const changes = JSON.parse(entry.payload);
+                    const parsed = CreateUserCommand.RequestBodySchema.safeParse(changes);
+                    if (!parsed.success || changes.username !== entry.target) throw new Error('ADMIN_INVALID_CHANGE');
+                    const squads = await creationSquads();
+                    if (!changes.activeInternalSquads?.length || changes.activeInternalSquads.some(uuid => !squads.some(squad => squad.uuid === uuid))) throw new Error('ADMIN_CREATE_DISABLED');
+                    try { await client.get(changes.username); throw new Error('ADMIN_USERNAME_EXISTS'); }
+                    catch (error) { if (error?.status !== 404) throw error; }
+                    state = 'uncertain';
+                    const created = await client.createUser(changes);
+                    state = 'done'; return { createdId: created.id };
+                }
                 const user = entry.operation === 'node-edit' ? await client.node(entry.target) : await get(entry.target);
-                if (digest(user, entry.operation) !== entry.baseline) throw new Error('ADMIN_STALE');
+                const changes = JSON.parse(entry.payload);
+                if (digest(user, entry.operation, changes) !== entry.baseline) throw new Error('ADMIN_STALE');
                 if (entry.operation === 'subscription') {
                     const url = new URL(user.subscriptionUrl);
                     if (url.protocol !== 'https:' || url.username || url.password || url.href.length > 2048) throw new Error('ADMIN_UNAVAILABLE');
                     state = 'done'; return { subscriptionUrl: url.href };
                 }
-                const changes = JSON.parse(entry.payload);
                 if (entry.operation === 'revoke') {
                     state = 'uncertain';
                     await client.revoke(user.id, changes.mode, user.shortUuid);
@@ -215,6 +302,18 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                     nodeChange(entry.target, changes.field, changes.value);
                     state = 'uncertain';
                     await client.updateNode(entry.target, changes.field, changes.value);
+                    state = 'done'; return { changed: true };
+                }
+                if (entry.operation === 'devices-clear') {
+                    const devices = await client.devices(user.id);
+                    if (hash(devices.map(device => device.selector).sort()) !== changes.fingerprint) throw new Error('ADMIN_STALE');
+                    state = 'uncertain';
+                    await client.clearDevices(user.id);
+                    state = 'done'; return { changed: true };
+                }
+                if (entry.operation === 'traffic-reset') {
+                    state = 'uncertain';
+                    await client.resetTraffic(user.id);
                     state = 'done'; return { changed: true };
                 }
                 if (entry.operation !== 'patch') throw new Error('ADMIN_INVALID_CHANGE');
@@ -243,45 +342,58 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
     let devicePage;
     let subscriptionTarget;
     let activePreview;
+    let directoryQuery = {};
+    let telegramQuery;
     const escape = value => String(value ?? 'нет данных').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
     const button = (text, callback_data) => ({ text, callback_data });
     const back = (data, label = '⬅ Назад') => [button(label, data)];
     const home = back('home', '🏠 Меню');
     const response = (text, rows = [back('admin_menu'), home]) => ({ text, reply_markup: { inline_keyboard: rows } });
-    const ticketParent = ticket => ticket.operation === 'node-edit' ? `an:${ticket.target}` : `au:${ticket.target}`;
+    const ticketParent = ticket => ticket.operation === 'create' ? 'anew' : ticket.operation === 'node-edit' ? `an:${ticket.target}` : `au:${ticket.target}`;
     const proposal = (ticket, parent = ticketParent(ticket)) => {
         activePreview = { id: ticket.id, parent };
         const description = {
             subscription: () => 'Показать секретную ссылку подписки только в этом чате.',
             revoke: () => ticket.changes.mode === 'keys' ? 'Отозвать и перевыпустить ключи. Ссылка останется прежней, клиенту потребуется обновить подписку.' : 'Отозвать ключи и старую ссылку. Панель выпустит новую ссылку, клиенту потребуется импортировать её заново.',
             'device-delete': () => `Удалить одно устройство: <b>${escape(ticket.changes.label)}</b>. Его слот освободится.`,
+            'devices-clear': () => `Удалить все зарегистрированные устройства пользователя. Сейчас их ${ticket.changes.count}.`,
+            'traffic-reset': () => `Сбросить текущий счётчик трафика (${formatTraffic(ticket.changes.usedBytes)}). Лимит и стратегия сохранятся.`,
             'node-edit': () => `${escape(ticket.changes.name)} · ${ticket.changes.field === 'name' ? 'Новое название' : 'Новая заметка'}: <code>${escape(ticket.changes.value ?? 'очистить')}</code>`,
-            patch: () => ticket.changes.expireAt && Object.keys(ticket.changes).length === 1 ? `Новый срок: <b>${moscow(ticket.changes.expireAt)} МСК</b>\n<code>${escape(ticket.changes.expireAt)}</code>` : `Изменения: <code>${escape(JSON.stringify(ticket.changes))}</code>`,
+            create: () => `Создать пользователя <b>${escape(ticket.changes.username)}</b>\nДо: ${moscow(ticket.changes.expireAt)} МСК\nТрафик: ${formatLimit(ticket.changes.trafficLimitBytes)}\nСброс: ${trafficStrategies[ticket.changes.trafficLimitStrategy]}\nУстройства: ${ticket.changes.hwidDeviceLimit}\nГруппы: ${ticket.squadNames ? ticket.squadNames.map(escape).join(', ') : `${ticket.changes.activeInternalSquads.length} разрешённых групп`}\nTelegram: ${ticket.changes.telegramId ?? 'не указан'}`,
+            patch: () => {
+                if (ticket.changes.expireAt && Object.keys(ticket.changes).length === 1) return `${ticket.previousExpireAt ? `Текущий срок: ${moscow(ticket.previousExpireAt)} МСК\n` : ''}Новый срок: <b>${moscow(ticket.changes.expireAt)} МСК</b>\n<code>${escape(ticket.changes.expireAt)}</code>`;
+                return Object.entries(ticket.changes).map(([field, value]) => `${labels[field]}: <b>${escape(field === 'trafficLimitBytes' ? formatLimit(value) : field === 'trafficLimitStrategy' ? trafficStrategies[value] : field === 'status' ? statusLabels[value] : value)}</b>`).join('\n');
+            },
         }[ticket.operation];
         return response(`<b>Подтверждение администратора</b>\n${ticket.operation === 'node-edit' ? 'Нода' : 'Пользователь'}: <code>${escape(ticket.target)}</code>\n${description()}\nДействует 3 минуты. ИИ не может подтвердить действие.`, [[button('✅ Подтвердить', `ac:${ticket.id}`), button('⬅ Назад / отменить', `ax:${ticket.id}`)]]);
     };
     const policy = () => administration.policy?.(actorId) ?? { writeEnabled: false, fields: [] };
     const navigation = [[button('📋 Список пользователей', 'aul:0'), button('🔎 Найти пользователя', 'admin_search')], [button('🗒 Операции', 'admin_operations')], back('q:users'), home];
-    const moscow = value => Number.isFinite(new Date(value ?? NaN).getTime()) ? new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) : 'нет данных';
     function paging(page, total, callback) {
         const controls = [];
         if (page > 0) controls.push(button('◀ Пред.', callback(page - 1)));
         if (page + 1 < Math.ceil(total / directoryPageSize)) controls.push(button('След. ▶', callback(page + 1)));
         return controls.length ? [controls] : [];
     }
-    const labels = { status: 'Статус', expireAt: 'Окончание подписки', description: 'Описание', email: 'Почта', telegramId: 'Telegram ID', trafficLimitBytes: 'Лимит трафика в байтах', tag: 'Метка', hwidDeviceLimit: 'Лимит устройств' };
+    const labels = { status: 'Статус', expireAt: 'Окончание подписки', description: 'Описание', email: 'Почта', telegramId: 'Telegram ID', trafficLimitBytes: 'Лимит трафика', tag: 'Метка', hwidDeviceLimit: 'Лимит устройств', trafficLimitStrategy: 'Стратегия сброса' };
+    const directoryStatus = { all: 'Все', ACTIVE: 'Активные', DISABLED: 'Отключённые', LIMITED: 'Исчерпали лимит', EXPIRED: 'Истекли' };
+    const sortLabels = { id: 'По ID', username: 'По имени', expireAt: 'По сроку подписки' };
+    const userButton = (user, destination) => [button(`#${user.id} · ${user.username.slice(0, 25)} · ${statusLabels[user.status]}`, destination)];
+    const grouped = (items, size = 3) => Array.from({ length: Math.ceil(items.length / size) }, (_, index) => items.slice(index * size, (index + 1) * size));
     const card = async (ref, page) => {
         const user = await administration.card(actorId, ref, true);
         subscriptionTarget = undefined;
         cardOrigin = { id: user.id, page: page ?? (cardOrigin?.id === user.id && cardOrigin.page) };
-        const parent = Number.isInteger(cardOrigin.page) ? `aul:${cardOrigin.page}` : 'q:users';
+        const parent = Number.isInteger(cardOrigin.page) ? `aul:${cardOrigin.page}` : cardOrigin.page === 'telegram' ? 'atse' : 'q:users';
         const permissions = policy();
-        const rows = [[button('🔗 Подписка', `as:${user.id}`)], [button('📱 Устройства', `ah:${user.id}:0`), button('🔌 Соединения', `aj:${user.id}:start`)]];
+        const rows = [[button('🔗 Подписка', `as:${user.id}`), button('📊 Трафик и лимиты', `atr:${user.id}`)], [button('📱 Устройства', `ah:${user.id}:0`), button('🔌 Соединения', `aj:${user.id}:start`)]];
         if (permissions.writeEnabled && permissions.fields.includes('expireAt')) rows.push([{ text: '⏳ Продлить', callback_data: `ar:${user.id}` }]);
         if (permissions.writeEnabled && permissions.fields.length) rows.push([{ text: '✏️ Изменить данные', callback_data: `av:${user.id}` }]);
-        if (permissions.writeEnabled && permissions.fields.includes('status')) rows.push([{ text: 'Включить', callback_data: `ae:${user.id}` }, { text: 'Отключить', callback_data: `ad:${user.id}` }]);
+        if (permissions.writeEnabled && permissions.fields.includes('status')) rows.push([user.status === 'DISABLED' ? button('Включить', `ae:${user.id}`) : button('Отключить', `ad:${user.id}`)]);
         rows.push([button('🔄 Обновить', `au:${user.id}`), button('🔎 Другой пользователь', 'admin_search')], back(parent), home);
-        return response(`<b>👤 ${escape(user.username)}</b>\nID: <code>${escape(user.id)}</code>\nСтатус: ${escape(user.status)}\nДо: ${moscow(user.expireAt)} МСК\nТрафик: ${escape(user.trafficUsedBytes)} / ${escape(user.trafficLimitBytes)} байт\nЛимит HWID: ${user.hwidDeviceLimit ?? 'по настройкам панели'}\nTelegram: ${user.telegramLinked ? 'привязан' : 'не привязан'}\nОписание: ${escape(user.description)}\nПроверено: ${moscow(user.observedAt)} МСК`, rows);
+        const remainingHours = Math.max(0, Math.ceil((Date.parse(user.expireAt) - now()) / 3600000));
+        const remaining = Number.isFinite(remainingHours) ? ` · ${remainingHours >= 24 ? `${Math.floor(remainingHours / 24)} дн. ` : ''}${remainingHours % 24} ч.` : '';
+        return response(`<b>👤 ${escape(user.username)} · #${user.id}</b>\nСтатус: ${statusLabels[user.status]}\nДо: ${moscow(user.expireAt)} МСК${remaining}\nТрафик: ${formatTraffic(user.trafficUsedBytes)} / ${formatLimit(user.trafficLimitBytes)}\nСброс: ${trafficStrategies[user.trafficLimitStrategy] ?? 'нет данных'}\nУстройства: ${user.devices ?? 'нет данных'} / ${Number.isSafeInteger(user.hwidDeviceLimit) ? user.hwidDeviceLimit : 'по настройкам панели'}\nПоследняя активность: ${user.lastOnlineAt ? `${moscow(user.lastOnlineAt)} МСК` : 'нет данных'}\nTelegram: ${user.telegramId ? `<code>${user.telegramId}</code>` : user.telegramLinked ? 'привязан' : 'не привязан'}${user.description ? `\nОписание: ${escape(user.description)}` : ''}${user.tag ? `\nМетка: ${escape(user.tag)}` : ''}\nПроверено: ${moscow(user.observedAt)} МСК`, rows);
     };
     function manualDate(text) {
         const match = text.match(/^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2})$/);
@@ -292,52 +404,75 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
         if (!Number.isFinite(stamp) || new Date(stamp).toISOString().slice(0, 19) !== localTime) throw new Error('ADMIN_INVALID_CHANGE');
         return localTime + '+03:00';
     }
+    const creation = createUserWizard({ administration, actorId, proposal, now });
     const handle = async ({ text = '', data, allowedUserId }) => {
         if (allowedUserId !== actorId) return null;
         const priorInput = input;
         if (data || text.startsWith('/') || /^(?:плат[её]ж|ответ|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) { input = undefined; userSection = false; }
+        const creationResult = await creation({ text, data });
+        if (creationResult) { input = undefined; userSection = true; return creationResult; }
         const match = text.match(/^(?:(?:покажи|открой|найди)\s+)?(?:пользователь|пользователя|юзер|юзера|user)\s+(?:(?:с\s+)?id\s+|#)?([A-Za-z0-9_-]{1,36})$/i);
         const edit = text.match(/^(?:измени|изменить)\s+([A-Za-z0-9_-]{1,36})\s+([A-Za-z]+)=(.{1,500})$/i);
         const subscription = text.match(/^(?:подписка|ссылка подписки)\s+([A-Za-z0-9_-]{1,36})$/i);
         const pending = text.match(/^заявка\s+([A-Za-z0-9_-]{16})$/);
-        const renewal = text.match(/^(?:продли|продлить)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})\s+на\s+(\d{1,3})\s+(?:день|дня|дней)$/i);
+        const renewal = text.match(/^(?:продли|продлить)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})\s+на\s+(\d{1,3})\s+(день|дня|дней|месяц|месяца|месяцев|год)$/i);
         const statusChange = text.match(/^(включи|отключи)\s+(?:пользователя\s+)?([A-Za-z0-9_-]{1,36})$/i);
         if (!input && /^подписка\s+[А-Яа-яЁё]/.test(text)) { userSection = false; return null; }
-        const interactive = /^(?:admin_home|admin_menu|admin_search|admin_cancel_input|admin_operations|a(?:r|v|s|rs|dt|hl):\d{1,16}|ap:\d{1,16}:\d{1,3}|af:\d{1,16}:[A-Za-z]+|aul:\d{1,16}|alc:\d{1,16}:\d{1,16}|ah:\d{1,16}:\d{1,10}|ahd:\d{1,16}:[A-Za-z0-9_-]{22}|ak:\d{1,16}:(?:rotate|keys)|aj:\d{1,16}:(?:start|check)|anl:\d{1,4}|a(?:n|nm):[0-9a-f-]{36}|anf:[0-9a-f-]{36}:(?:name|note))$/.test(data ?? '');
+        const interactive = /^(?:admin_home|admin_menu|admin_search|admin_cancel_input|admin_operations|a(?:ts|ns|tse|usort)|aue:(?:all|ACTIVE|DISABLED|LIMITED|EXPIRED)|aus:(?:id|username|expireAt)|a(?:r|v|s|rs|dt|hl|hpres|hc|tr|tlim|tcustom|treset|tstrategies|te):\d{1,16}|a(?:p|rm|hset|tset):\d{1,16}:\d{1,4}|acal:\d{1,16}(?::\d{4,6})?|acday:\d{1,16}:\d{4,6}:\d{1,2}|atstrategy:\d{1,16}:[A-Z_]+|af:\d{1,16}:[A-Za-z]+|aul:\d{1,16}|alc:\d{1,16}:\d{1,16}|ah:\d{1,16}:\d{1,10}|ah[dv]:\d{1,16}:[A-Za-z0-9_-]{22}|ak:\d{1,16}:(?:rotate|keys)|aj:\d{1,16}:(?:start|check)|anl:\d{1,4}|a(?:n|nm):[0-9a-f-]{36}|anf:[0-9a-f-]{36}:(?:name|note))$/.test(data ?? '');
         const inactiveReference = !data && !input && userSection && reference(text.trim());
         if (!match && !edit && !subscription && !pending && !renewal && !statusChange && !input && !interactive && !inactiveReference && !/^(?:ac:|ax:|al:|au:|ad:|ae:)/.test(data ?? '') && !/^(?:пользователь|юзер|user|измени|изменить|подписка|ссылка подписки|заявка|продли|продлить|включи|отключи)(?:\s|$)/i.test(text)) { userSection = false; return null; }
         let failureBack = 'admin_menu';
         try {
             userSection = true;
             if (data === 'admin_menu') return response('<b>👥 Пользователи</b>\nОткройте свежий список или найдите пользователя по точному ID или username.', [[button('📋 Список пользователей', 'aul:0'), button('🔎 Найти пользователя', 'admin_search')], [button('📊 Сводка', 'q:users'), button('🗒 Операции', 'admin_operations')], back('stats_menu'), home]);
-            if (data === 'admin_home' || data === 'admin_search') { input = { kind: 'search', at: now() }; cardOrigin = undefined; return response('<b>Поиск пользователя</b>\nВведите точный числовой ID или username без дополнительных слов. Ввод действует 2 минуты; похожие имена не подбираются. ИИ не используется.', [[button('⬅ Назад / отменить', 'admin_cancel_input'), button('🗒 Операции', 'admin_operations')], home]); }
+            if (data === 'admin_home' || data === 'admin_search') {
+                input = { kind: 'search', at: now() }; cardOrigin = undefined;
+                return response('<b>Поиск пользователя</b>\nВведите точный числовой ID или username. Для других способов используйте кнопки. Ввод действует 2 минуты.', [[button('По части имени', 'ans'), button('По Telegram ID', 'ats')], [button('⬅ Назад / отменить', 'admin_cancel_input'), button('🗒 Операции', 'admin_operations')], home]);
+            }
             if (data === 'admin_cancel_input') return response('Ввод отменён. Панель не изменялась.', navigation);
             if (data === 'admin_operations') {
                 const entries = administration.operations?.(actorId) ?? [];
-                return response('<b>Последние сохранённые операции</b>\n' + (entries.length ? entries.map(entry => `#${escape(entry.target)} · ${escape(entry.operation)} · ${escape(entry.state)}\n<code>${escape(entry.id)}</code>`).join('\n\n') : 'Операций пока нет.') + '\n\nexecuting / uncertain требуют проверки, а не повторной отправки. Полезная нагрузка и секретные ссылки не показываются.', navigation);
+                const operations = { create: 'Создание пользователя', patch: 'Изменение данных', subscription: 'Выдача ссылки', revoke: 'Отзыв подписки', 'device-delete': 'Удаление устройства', 'devices-clear': 'Очистка устройств', 'traffic-reset': 'Сброс трафика', 'node-edit': 'Изменение ноды' };
+                const states = { pending: 'Ожидает подтверждения', executing: 'Выполняется', uncertain: 'Результат требует сверки', done: 'Выполнено', rejected: 'Отклонено', cancelled: 'Отменено', expired: 'Истекло' };
+                return response('<b>Последние сохранённые операции</b>\n' + (entries.length ? entries.map(entry => `#${escape(entry.target)} · ${operations[entry.operation] ?? 'Операция'}\n${states[entry.state] ?? 'Сверьте результат'}\n<code>${escape(entry.id)}</code>`).join('\n\n') : 'Операций пока нет.') + '\n\nВыполняющиеся операции и неясные результаты сначала сверьте с панелью.', navigation);
             }
-            const [route, target, argument] = (data ?? '').split(':');
-            if (route === 'aul') {
-                const page = Number(target);
-                const { users, total } = await administration.users(actorId, page);
+            const [route, target, argument, day] = (data ?? '').split(':');
+            if (route === 'ats' || route === 'ans') {
+                input = { kind: route === 'ats' ? 'telegram-search' : 'name-search', parent: 'admin_search', at: now() };
+                return response(route === 'ats' ? 'Введите числовой Telegram ID.' : 'Введите от 3 до 36 символов имени: латинские буквы, цифры, «_» или «-».', [back('admin_search')]);
+            }
+            if (route === 'atse') {
+                if (!telegramQuery) return response('Поиск устарел. Введите Telegram ID заново.', [back('ats')]);
+                const { users, partial } = await administration.usersByTelegram(actorId, telegramQuery);
+                return response(`<b>Результаты поиска по Telegram ID</b>\n${users.length ? partial ? 'Показаны первые восемь совпадений.' : `Найдено: ${users.length}` : 'Совпадений нет.'}`, [...users.map(user => userButton(user, `ate:${user.id}`)), back('admin_search')]);
+            }
+            if (route === 'ate') { failureBack = 'atse'; return await card(target, 'telegram'); }
+            if (route === 'ausort') return response('<b>Сортировка пользователей</b>', [...Object.entries(sortLabels).map(([sort, label]) => [button(`${(directoryQuery.sort ?? 'id') === sort ? '✓ ' : ''}${label}`, `aus:${sort}`)]), back('aul:0')]);
+            if (route === 'aul' || route === 'aue' || route === 'aus') {
+                if (route === 'aue') directoryQuery = { sort: directoryQuery.sort, status: target };
+                if (route === 'aus') directoryQuery = { ...directoryQuery, sort: target };
+                const page = route === 'aul' ? Number(target) : 0;
+                const { users, total } = await administration.users(actorId, page, directoryQuery);
                 const lastPage = Math.max(0, Math.ceil(total / directoryPageSize) - 1);
                 if (page > lastPage) return response('Список изменился. Откройте последнюю доступную страницу.', [back(`aul:${lastPage}`, 'К списку'), back('admin_menu')]);
-                return response(`<b>👥 Все пользователи</b>\nВсего: ${total} · страница ${page + 1}/${lastPage + 1}\nВыберите карточку. Список обновляется при открытии каждой страницы.`, [
-                    ...users.map(user => [button(`#${user.id} · ${user.username} · ${user.status}`, `alc:${user.id}:${page}`)]), ...paging(page, total, next => `aul:${next}`),
-                    [button('🔄 Обновить', `aul:${page}`), button('🔎 Поиск', 'admin_search')], back('q:users'), home,
+                return response(`<b>👥 Пользователи</b>\n${directoryQuery.name ? `Поиск: ${escape(directoryQuery.name)}` : directoryStatus[directoryQuery.status ?? 'all']} · ${sortLabels[directoryQuery.sort ?? 'id']}\nНайдено: ${total} · страница ${page + 1}/${lastPage + 1}`, [
+                    ...users.map(user => userButton(user, `alc:${user.id}:${page}`)), ...paging(page, total, next => `aul:${next}`),
+                    [button('🔄 Обновить', `aul:${page}`), button('Сортировка', 'ausort'), button('🔎 Поиск', 'admin_search')],
+                    [button('Все', 'aue:all'), button('Активные', 'aue:ACTIVE'), button('Отключённые', 'aue:DISABLED')],
+                    [button('Истекли', 'aue:EXPIRED'), button('Исчерпали лимит', 'aue:LIMITED')], back('q:users'), home,
                 ]);
             }
             if (route === 'alc') { failureBack = `aul:${argument}`; return await card(target, Number(argument)); }
             if (route === 'as' || route === 'ars') {
                 failureBack = `au:${target}`;
-                const user = await administration.card(actorId, target, true);
+                const user = await administration.card(actorId, target, 'menu');
                 subscriptionTarget = target;
                 if (route === 'ars') {
                     if (!administration.canUserAction(target)) throw new Error('ADMIN_ACTION_DISABLED');
                     return response(`<b>Отзыв подписки · ${escape(user.username)}</b>\nОба режима меняют ключи подключения. Выберите, нужно ли также сменить ссылку.`, [[button('🔁 Ключи и новая ссылка', `ak:${target}:rotate`)], [button('🔑 Только ключи', `ak:${target}:keys`)], back(`as:${target}`)]);
                 }
                 const permissions = policy();
-                return response(`<b>🔗 Подписка · ${escape(user.username)}</b>\nСтатус: ${escape(user.status)}\nОкончание: ${moscow(user.expireAt)} МСК`, [
+                return response(`<b>🔗 Подписка · ${escape(user.username)}</b>\nСтатус: ${statusLabels[user.status]}\nОкончание: ${moscow(user.expireAt)} МСК`, [
                     [button('Показать ссылку', `al:${target}`)],
                     ...(permissions.writeEnabled && permissions.fields.includes('expireAt') ? [[button('⏳ Продлить', `ar:${target}`)]] : []),
                     ...(administration.canUserAction(target) ? [[button('🔁 Отозвать / перевыпустить', `ars:${target}`)]] : []),
@@ -345,20 +480,74 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                 ]);
             }
             if (route === 'ak') { failureBack = `ars:${target}`; return proposal(await administration.prepareAction(actorId, target, 'revoke', argument), failureBack); }
-            if (route === 'ah' || route === 'ahd') {
+            if (['atr', 'atlim', 'atset', 'atcustom', 'atstrategies', 'atstrategy', 'atreset'].includes(route)) {
+                const parent = `atr:${target}`;
+                failureBack = parent;
+                const permissions = policy();
+                const mayEdit = field => permissions.writeEnabled && permissions.fields.includes(field);
+                if (route === 'atreset') return proposal(await administration.prepareAction(actorId, target, 'traffic-reset'), parent);
+                if (route === 'atset' || route === 'atstrategy') {
+                    const field = route === 'atset' ? 'trafficLimitBytes' : 'trafficLimitStrategy';
+                    const value = route === 'atset' && ['0', '16', '100', '300', '500', '1000'].includes(argument) ? parseGigabytes(argument) : route === 'atstrategy' && Object.hasOwn(trafficStrategies, argument) ? argument : undefined;
+                    if (value === undefined) throw new Error('ADMIN_INVALID_CHANGE');
+                    return proposal(await administration.prepare(actorId, target, { [field]: value }, false, true), route === 'atset' ? `atlim:${target}` : `atstrategies:${target}`);
+                }
+                if (route === 'atcustom') {
+                    if (!mayEdit('trafficLimitBytes')) throw new Error('ADMIN_FIELD_DISABLED');
+                    input = { kind: 'gigabytes', target, field: 'trafficLimitBytes', parent: `atlim:${target}`, at: now() };
+                    return response('Введите лимит в ГБ. Можно указать до трёх знаков после запятой. 0 — без лимита.', [back(input.parent)]);
+                }
+                const user = await administration.card(actorId, target, 'menu');
+                if (route === 'atlim') {
+                    if (!mayEdit('trafficLimitBytes')) throw new Error('ADMIN_FIELD_DISABLED');
+                    return response(`<b>Лимит трафика</b>\nСейчас: ${formatLimit(user.trafficLimitBytes)}`, [...grouped([16, 100, 300, 500, 1000, 0].map(limit => button(`${user.trafficLimitBytes === parseGigabytes(String(limit)) ? '✓ ' : ''}${limit ? `${limit} ГБ` : 'Без лимита'}`, `atset:${target}:${limit}`)), 2), [button('Ввести в ГБ', `atcustom:${target}`)], back(parent)]);
+                }
+                if (route === 'atstrategies') {
+                    if (!mayEdit('trafficLimitStrategy')) throw new Error('ADMIN_FIELD_DISABLED');
+                    return response('<b>Стратегия сброса трафика</b>', [...Object.entries(trafficStrategies).map(([strategy, label]) => [button(`${user.trafficLimitStrategy === strategy ? '✓ ' : ''}${label}`, `atstrategy:${target}:${strategy}`)]), back(parent)]);
+                }
+                return response(`<b>📊 Трафик · ${escape(user.username)}</b>\nИспользовано: ${formatTraffic(user.trafficUsedBytes)}\nЛимит: ${formatLimit(user.trafficLimitBytes)}\nСброс: ${trafficStrategies[user.trafficLimitStrategy] ?? 'нет данных'}`, [
+                    ...(mayEdit('trafficLimitBytes') ? [[button('Изменить лимит', `atlim:${target}`)]] : []),
+                    ...(mayEdit('trafficLimitStrategy') ? [[button('Стратегия сброса', `atstrategies:${target}`)]] : []),
+                    ...(administration.canDestructiveAction(target) ? [[button('Сбросить счётчик', `atreset:${target}`)]] : []), back(`au:${target}`),
+                ]);
+            }
+            if (route === 'hc' || route === 'ahc') {
+                failureBack = `ah:${target}:${devicePage?.target === target ? devicePage.page : 0}`;
+                return proposal(await administration.prepareAction(actorId, target, 'devices-clear'), failureBack);
+            }
+            if (route === 'ahpres' || route === 'ahset') {
+                failureBack = `ah:${target}:${devicePage?.target === target ? devicePage.page : 0}`;
+                if (!policy().writeEnabled || !policy().fields.includes('hwidDeviceLimit')) throw new Error('ADMIN_FIELD_DISABLED');
+                const values = [1, 2, 3, 4, 5, 10];
+                if (route === 'ahset') {
+                    if (!values.includes(Number(argument))) throw new Error('ADMIN_INVALID_CHANGE');
+                    return proposal(await administration.prepare(actorId, target, { hwidDeviceLimit: Number(argument) }, false, true), `ahpres:${target}`);
+                }
+                const user = await administration.card(actorId, target, 'menu');
+                return response(`<b>Лимит устройств</b>\nСейчас: ${user.hwidDeviceLimit ?? 'по настройкам панели'}`, [...grouped(values.map(limit => button(`${user.hwidDeviceLimit === limit ? '✓ ' : ''}${limit}`, `ahset:${target}:${limit}`))), [button('Ввести вручную', `ahl:${target}`)], back(failureBack)]);
+            }
+            if (route === 'ah' || route === 'ahd' || route === 'ahv') {
                 failureBack = `au:${target}`;
                 if (route === 'ahd') { failureBack = `ah:${target}:${devicePage?.target === target ? devicePage.page : 0}`; return proposal(await administration.prepareAction(actorId, target, 'device-delete', argument), failureBack); }
-                const page = Number(argument);
                 const devices = await administration.devices(actorId, target);
+                if (route === 'ahv') {
+                    failureBack = `ah:${target}:${devicePage?.target === target ? devicePage.page : 0}`;
+                    const device = devices.find(item => item.selector === argument);
+                    if (!device) throw new Error('ADMIN_STALE');
+                    return response(`<b>📱 ${escape(device.label)}</b>\nДобавлено: ${moscow(device.createdAt)} МСК`, [...(administration.canUserAction(target) ? [[button('Удалить устройство', `ahd:${target}:${argument}`)]] : []), back(failureBack)]);
+                }
+                const page = Number(argument);
                 const lastPage = Math.max(0, Math.ceil(devices.length / directoryPageSize) - 1);
                 if (page > lastPage) return response('Список устройств изменился.', [back(`ah:${target}:${lastPage}`, 'К устройствам'), back(`au:${target}`)]);
                 devicePage = { target, page };
                 const visible = devices.slice(page * directoryPageSize, (page + 1) * directoryPageSize);
                 const permissions = policy();
                 return response(`<b>📱 Устройства · #${target}</b>\nЗарегистрировано: ${devices.length} · страница ${page + 1}/${lastPage + 1}` + visible.map((device, index) => `\n${page * directoryPageSize + index + 1}. ${escape(device.label.slice(0, 60))} · добавлено ${moscow(device.createdAt)} МСК`).join(''), [
-                    ...(administration.canUserAction(target) ? visible.map((device, index) => [button(`Удалить №${page * directoryPageSize + index + 1} · ${device.label.slice(0, 32)}`, `ahd:${target}:${device.selector}`)]) : []),
+                    ...visible.map((device, index) => [button(`№${page * directoryPageSize + index + 1} · ${device.label.slice(0, 42)}`, `ahv:${target}:${device.selector}`), ...(administration.canUserAction(target) ? [button('Удалить', `ahd:${target}:${device.selector}`)] : [])]),
                     ...paging(page, devices.length, next => `ah:${target}:${next}`),
-                    ...(permissions.writeEnabled && permissions.fields.includes('hwidDeviceLimit') ? [[button('Изменить лимит HWID', `ahl:${target}`)]] : []),
+                    ...(permissions.writeEnabled && permissions.fields.includes('hwidDeviceLimit') ? [[button('Изменить лимит HWID', `ahpres:${target}`)]] : []),
+                    ...(devices.length && administration.canDestructiveAction(target) ? [[button('Очистить список', `ahc:${target}`)]] : []),
                     [button('🔄 Обновить', `ah:${target}:${page}`)], back(`au:${target}`), home,
                 ]);
             }
@@ -390,7 +579,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                     if (!administration.canNodeEdit(target)) throw new Error('ADMIN_ACTION_DISABLED');
                     return response(`<b>Изменить · ${escape(node.name)}</b>\nДоступны название и заметка. Для записи потребуется подтверждение.`, [[button('Название', `anf:${target}:name`), button('Заметка', `anf:${target}:note`)], back(`an:${target}`)]);
                 }
-                return response(`<b>🖥 ${escape(node.name)}</b>\nСостояние: ${escape(node.state)}\nОнлайн: ${escape(node.online)}\nСтрана: ${escape(node.country)}\nТрафик: ${escape(node.trafficUsed)} / ${escape(node.trafficLimit)} байт\nЗаметка: ${escape(node.note)}\nПроверено: ${moscow(now())} МСК`, [
+                return response(`<b>🖥 ${escape(node.name)}</b>\nСостояние: ${escape(node.state)}\nОнлайн: ${escape(node.online)}\nСтрана: ${escape(node.country)}\nТрафик: ${formatTraffic(node.trafficUsed)} / ${formatLimit(node.trafficLimit)}\nЗаметка: ${escape(node.note)}\nПроверено: ${moscow(now())} МСК`, [
                     ...(administration.canNodeEdit(target) ? [[button('✏️ Изменить', `anm:${target}`)]] : []), [button('🔄 Обновить', `an:${target}`)], back(`anl:${nodePage}`), home,
                 ]);
             }
@@ -398,13 +587,36 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
             if (renewPreset) {
                 failureBack = `ar:${renewPreset[1]}`;
                 if (!renewalDays.includes(Number(renewPreset[2]))) throw new Error('ADMIN_INVALID_CHANGE');
-                return proposal(await administration.prepareRenewal(actorId, renewPreset[1], Number(renewPreset[2])), failureBack);
+                return proposal(await administration.prepareRenewal(actorId, renewPreset[1], Number(renewPreset[2]), true), failureBack);
             }
             const renewMenu = data?.match(/^ar:(\d{1,16})$/);
             if (renewMenu) {
                 if (!policy().writeEnabled || !policy().fields.includes('expireAt')) throw new Error('ADMIN_WRITE_DISABLED');
                 const parent = subscriptionTarget === target ? `as:${target}` : `au:${target}`;
-                return response('Выберите срок. После выбора откроется предпросмотр новой даты.', [...renewalDays.map(days => [button(`+${days} дн.`, `ap:${target}:${days}`)]), [button('📅 Ввести дату вручную', `adt:${target}`)], back(parent)]);
+                return response('Выберите срок. После выбора откроется предпросмотр новой даты. Месяцы считаются по календарю Москвы.', [
+                    ...grouped(renewalDays.map(days => button(`+${days} дн.`, `ap:${target}:${days}`)), 2),
+                    ...grouped([1, 2, 3, 6, 9, 12].map(months => button(months === 12 ? '+1 год' : `+${months} мес.`, `arm:${target}:${months}`)), 2),
+                    [button('📅 Выбрать дату', `acal:${target}`), button('Ввести дату', `adt:${target}`)], back(parent),
+                ]);
+            }
+            if (route === 'arm') {
+                failureBack = `ar:${target}`;
+                return proposal(await administration.prepareCalendarRenewal(actorId, target, Number(argument)), failureBack);
+            }
+            if (route === 'acal' || route === 'acday') {
+                failureBack = `ar:${target}`;
+                if (!policy().writeEnabled || !policy().fields.includes('expireAt')) throw new Error('ADMIN_FIELD_DISABLED');
+                const user = await administration.card(actorId, target, 'menu');
+                const baseline = Math.max(now(), Date.parse(user.expireAt));
+                const firstMonth = calendarMonth(baseline);
+                const month = argument === undefined ? firstMonth : Number(argument);
+                if (!Number.isFinite(baseline) || !Number.isInteger(month) || month < firstMonth || month > firstMonth + 24) throw new Error('ADMIN_INVALID_CHANGE');
+                if (route === 'acday') return proposal(await administration.prepare(actorId, target, { expireAt: calendarExpiry(month, Number(day)) }, true, true), `acal:${target}:${month}`);
+                const lastDay = new Date(Date.UTC(Math.floor(month / 12), month % 12 + 1, 0)).getUTCDate();
+                const days = Array.from({ length: lastDay }, (_, index) => index + 1).filter(value => Date.parse(calendarExpiry(month, value)) > baseline);
+                const title = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', month: 'long', year: 'numeric' }).format(new Date(calendarExpiry(month, 1)));
+                const navigation = [...(month > firstMonth ? [button('◀ Месяц', `acal:${target}:${month - 1}`)] : []), ...(month < firstMonth + 24 ? [button('Месяц ▶', `acal:${target}:${month + 1}`)] : [])];
+                return response(`<b>📅 ${title}</b>\nВыберите день. Окончание в 23:59 МСК.`, [...grouped(days.map(value => button(String(value), `acday:${target}:${month}:${value}`))), ...(navigation.length ? [navigation] : []), back(`ar:${target}`)]);
             }
             const fieldsMenu = data?.match(/^av:(\d{1,16})$/);
             if (fieldsMenu) {
@@ -414,6 +626,8 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
             const fieldInput = route === 'adt' ? [data, target, 'expireAt'] : route === 'ahl' ? [data, target, 'hwidDeviceLimit'] : data?.match(/^af:(\d{1,16}):([A-Za-z]+)$/);
             if (fieldInput) {
                 if (!policy().writeEnabled || !policy().fields.includes(fieldInput[2])) throw new Error('ADMIN_FIELD_DISABLED');
+                const selection = { trafficLimitBytes: 'atlim', trafficLimitStrategy: 'atstrategies', hwidDeviceLimit: 'ahpres' }[fieldInput[2]];
+                if (route === 'af' && selection) return await handle({ data: `${selection}:${target}`, allowedUserId });
                 const parent = route === 'adt' ? `ar:${target}` : route === 'ahl' ? `ah:${target}:${devicePage?.target === target ? devicePage.page : 0}` : `av:${target}`;
                 input = { kind: route === 'adt' ? 'date' : 'field', target: fieldInput[1], field: fieldInput[2], parent, at: now() };
                 const help = fieldInput[2] === 'expireAt' ? 'Формат: ДД.ММ.ГГГГ ЧЧ:ММ по Москве или ISO 8601 с часовым поясом.' : fieldInput[2] === 'status' ? 'Допустимые значения: ACTIVE и DISABLED.' : ['trafficLimitBytes', 'hwidDeviceLimit', 'telegramId'].includes(fieldInput[2]) ? 'Введите целое число.' : '';
@@ -428,10 +642,21 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                     if (!reference(text.trim())) return response('Нужен точный ID или username; панель и ИИ не запрашивались.', navigation);
                     return await card(text.trim());
                 }
+                if (value.kind === 'name-search') {
+                    if (!/^[A-Za-z0-9_-]{3,36}$/.test(text.trim())) throw new Error('ADMIN_INVALID_REFERENCE');
+                    directoryQuery = { name: text.trim() };
+                    return await handle({ data: 'aul:0', allowedUserId });
+                }
+                if (value.kind === 'telegram-search') {
+                    if (!positiveId(text.trim())) throw new Error('ADMIN_INVALID_REFERENCE');
+                    telegramQuery = text.trim();
+                    return await handle({ data: 'atse', allowedUserId });
+                }
                 if (!text.length || text.length > 500) throw new Error('ADMIN_INVALID_CHANGE');
                 if (value.kind === 'node') return proposal(await administration.prepareNodeEdit(actorId, value.target, value.field, value.field === 'note' && text === '-' ? null : text), failureBack);
                 let converted = text;
-                if (['trafficLimitBytes', 'hwidDeviceLimit', 'telegramId'].includes(value.field)) {
+                if (value.kind === 'gigabytes') converted = parseGigabytes(text);
+                else if (['trafficLimitBytes', 'hwidDeviceLimit', 'telegramId'].includes(value.field)) {
                     if (!/^\d+$/.test(text) || !Number.isSafeInteger(Number(text))) throw new Error('ADMIN_INVALID_CHANGE');
                     converted = Number(text);
                 }
@@ -439,18 +664,28 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                     converted = manualDate(text);
                     if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(converted) || !(Date.parse(converted) > now())) throw new Error('ADMIN_INVALID_CHANGE');
                 }
-                return proposal(await administration.prepare(actorId, value.target, { [value.field]: converted }, value.kind === 'date'), failureBack);
+                return proposal(await administration.prepare(actorId, value.target, { [value.field]: converted }, value.kind === 'date', true), failureBack);
             }
             if (priorInput && (match || edit || subscription || pending || renewal || statusChange)) input = undefined;
             if (pending) return proposal(administration.preview(actorId, pending[1]));
-            if (renewal) return proposal(await administration.prepareRenewal(actorId, renewal[1], Number(renewal[2])));
+            if (renewal) {
+                const count = Number(renewal[2]);
+                const calendar = /^(?:месяц|год)/i.test(renewal[3]);
+                return proposal(calendar ? await administration.prepareCalendarRenewal(actorId, renewal[1], renewal[3].toLowerCase() === 'год' ? count * 12 : count) : await administration.prepareRenewal(actorId, renewal[1], count));
+            }
             if (statusChange) return proposal(await administration.prepare(actorId, statusChange[2], { status: statusChange[1].toLowerCase() === 'включи' ? 'ACTIVE' : 'DISABLED' }));
             if (data?.startsWith('ac:')) {
                 const ticket = administration.preview(actorId, data.slice(3));
                 failureBack = ticketParent(ticket);
                 const result = await administration.confirm(actorId, data.slice(3));
-                const parent = ticket.operation === 'subscription' || ticket.operation === 'revoke' ? `as:${ticket.target}` : ticket.operation === 'device-delete' ? `ah:${ticket.target}:${devicePage?.target === ticket.target ? devicePage.page : 0}` : failureBack;
-                return response(result.subscriptionUrl ? `<b>Ссылка подписки — не пересылайте её</b>\n<code>${escape(result.subscriptionUrl)}</code>` : '✅ Изменение подтверждено панелью.', [back(parent), home]);
+                if (result.createdId) return response(`✅ Создан пользователь #${result.createdId}.`, [[button('Открыть карточку', `au:${result.createdId}`)], back('anew'), home]);
+                const parent = ticket.operation === 'subscription' || ticket.operation === 'revoke' ? `as:${ticket.target}` : ['device-delete', 'devices-clear'].includes(ticket.operation) ? `ah:${ticket.target}:${devicePage?.target === ticket.target ? devicePage.page : 0}` : ticket.operation === 'traffic-reset' ? `atr:${ticket.target}` : failureBack;
+                if (result.subscriptionUrl) {
+                    const link = result.subscriptionUrl;
+                    const links = [{ text: '🌐 Открыть подписку', url: link }, ...(link.length <= 256 ? [{ text: '📋 Скопировать ссылку', copy_text: { text: link } }] : [])];
+                    return response(`<b>Подписка пользователя #${ticket.target}</b>\nСсылка доступна по кнопкам. ${link.length > 256 ? 'Длинную ссылку можно скопировать после открытия в браузере.' : ''}`, [links, back(parent), home]);
+                }
+                return response('✅ Изменение подтверждено панелью.', [back(parent), home]);
             }
             if (data?.startsWith('ax:')) {
                 const ticket = administration.preview(actorId, data.slice(3));
@@ -460,7 +695,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                 return await handle({ data: parent, allowedUserId });
             }
             if (subscription || data?.startsWith('al:')) {
-                const ticket = await administration.prepareSubscription(actorId, subscription?.[1] ?? target);
+                const ticket = await administration.prepareSubscription(actorId, subscription?.[1] ?? target, !!data);
                 return proposal(ticket, `as:${ticket.target}`);
             }
             if (edit) {
@@ -468,7 +703,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                 const value = ['trafficLimitBytes', 'hwidDeviceLimit', 'telegramId'].includes(field) ? Number(edit[3]) : edit[3];
                 return proposal(await administration.prepare(actorId, edit[1], { [field]: value }));
             }
-            if (/^a[de]:/.test(data ?? '')) return proposal(await administration.prepare(actorId, data.slice(3), { status: data.startsWith('ae:') ? 'ACTIVE' : 'DISABLED' }));
+            if (/^a[de]:/.test(data ?? '')) return proposal(await administration.prepare(actorId, data.slice(3), { status: data.startsWith('ae:') ? 'ACTIVE' : 'DISABLED' }, false, true));
             return await card(match?.[1] ?? data?.slice(3));
         } catch (error) {
             const messages = {

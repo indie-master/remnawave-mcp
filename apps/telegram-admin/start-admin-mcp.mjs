@@ -10,7 +10,7 @@ try {
     if (process.argv.slice(2).join(' ') !== '--stdio --confirm-admin-context') throw new Error('ADMIN_CONTEXT_NOT_CONFIRMED');
     const config = readServerConfig(process.env); const extensions = readExtensions(process.env);
     if (!extensions.adminRead) throw new Error('ADMIN_DISABLED');
-    administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields, client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile }) });
+    administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields, createOptions: extensions.createOptions, client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile }) });
     const server = createAdministrationMcp(administration, config.allowedUserId);
     server.onclose = () => administration.close();
     await server.connect(new StdioServerTransport());

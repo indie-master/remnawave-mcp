@@ -42,11 +42,11 @@ async function main() {
     const service = createConfiguredService({ baseUrl: config.baseUrl, tokenFile: config.panelTokenFile, usersEnabled: config.usersEnabled, allowedReports: config.allowedReports, signal: controller.signal });
     if (statSync(config.telegramTokenFile).size > 4096) throw new Error('INVALID_LOCAL_CREDENTIAL');
     const token = readFileSync(config.telegramTokenFile, 'utf8').trim();
-    const apiOptions = { token, allowedUserId: config.allowedUserId, enableButtons: true };
+    const apiOptions = { token, allowedUserId: config.allowedUserId, enableButtons: true, enableSubscriptionButtons: true };
     const api = createTelegramApi({ ...apiOptions, signal: controller.signal });
     const finalApi = createTelegramApi(apiOptions);
     const nodesEnabled = config.allowedReports.includes('nodes') && config.allowedReports.includes('node_details');
-    if (extensions.adminRead) administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile, signal: controller.signal }), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields, actionUserIds: extensions.actionUserIds, actionNodeUuids: extensions.actionNodeUuids, nodesEnabled });
+    if (extensions.adminRead) administration = createUserAdministration({ filename: join(config.stateDirectory, 'admin.sqlite'), client: createUserClient({ baseUrl: config.baseUrl, readTokenFile: config.panelTokenFile, signal: controller.signal }), actorId: config.allowedUserId, readEnabled: true, writeEnabled: extensions.adminWrite, allowedFields: extensions.adminFields, actionUserIds: extensions.actionUserIds, actionNodeUuids: extensions.actionNodeUuids, destructiveUserActions: extensions.destructiveUserActions, createOptions: extensions.createOptions, nodesEnabled });
     const userHandler = administration ? createAdminHandler({ administration, actorId: config.allowedUserId, renewalDays: extensions.renewalDays }) : undefined;
     const businessHandler = extensions.business ? createBusinessAdmin({ actorId: config.allowedUserId, administration }) : undefined;
     const offsetFile = join(config.stateDirectory, 'offset.json');
@@ -63,6 +63,7 @@ async function main() {
         classify, budgetStatus: intentStore ? async () => { const local = intentStore.status(); try { return { ...local, shared: await aiClient?.usage() }; } catch { return local; } } : undefined, enhancedUi: config.enhancedUi, aiEnabled: config.aiEnabled && !!classify,
         autoMenu: extensions.autoMenu,
         adminDirectory: !!userHandler,
+        adminCreate: extensions.createOptions.enabled,
         extraButtons: [...(userHandler && !config.enhancedUi ? [[{ text: '👤 Найти пользователя', callback_data: 'admin_home' }]] : []), ...(businessHandler ? [[{ text: '💳 Оплаты и продления', callback_data: 'business_home' }]] : [])],
         voiceInput: extensions.voice ? createVoiceInput({ api, allowedUserId: config.allowedUserId, maxSeconds: extensions.voiceSeconds, maxBytes: extensions.voiceBytes }) : undefined,
         adminHandle: userHandler || businessHandler ? async request => (await userHandler?.(request)) ?? (await businessHandler?.(request)) : undefined,

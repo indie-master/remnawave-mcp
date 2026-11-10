@@ -224,6 +224,20 @@ test('unavailable rollback images refuse update before checkout or build, withou
     assert.equal(readFileSync(join(state.app, '.env'), 'utf8'), base);
 });
 
+test('rollback validates current settings with the previous image before changing tags or source', { skip: !hostTest }, () => {
+    const state = fixture();
+    assert.equal(state.run(['adopt']).status, 0);
+    assert.equal(state.run(['apply']).status, 0);
+    assert.equal(state.run(['update', nextRevision]).status, 0);
+    assert.equal(state.run(['apply']).status, 0);
+    const before = state.commands().length;
+    const result = state.run(['rollback'], { MOCK_VALIDATION_FAIL: 'true' });
+    assert.notEqual(result.status, 0);
+    const commands = state.commands().slice(before);
+    assert.ok(commands.some(args => args.includes('run') && args.some(arg => arg.startsWith('panel-admin-bot:checkpoint-'))));
+    assert.ok(!commands.some(args => args.includes('checkout') || args.includes('tag') || args.includes('stop') || args.includes('up')));
+});
+
 test('external deletion of rollback references keeps pending and reports incomplete recovery honestly', { skip: !hostTest }, () => {
     const state = fixture(); state.run(['adopt']); assert.equal(state.run(['apply']).status, 0);
     writeFileSync(state.log, '');

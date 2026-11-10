@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto';
-import { GetUsersCommand, GetNodesCommand, GetNodeCommand, UpdateNodeCommand, GetUserHwidDevicesCommand, DeleteUserHwidDeviceCommand, RevokeUserSubscriptionCommand, ConnectionsByUserCommand, ConnectionsByUserResultCommand } from '@remnawave/backend-contract';
+import { CreateUserCommand, GetInternalSquadsCommand, GetUsersCommand, GetUsersStreamCommand, GetNodesCommand, GetNodeCommand, UpdateNodeCommand, GetUserHwidDevicesCommand, DeleteUserHwidDeviceCommand, DeleteAllUserHwidDevicesCommand, RevokeUserSubscriptionCommand, ResetUserTrafficCommand, ConnectionsByUserCommand, ConnectionsByUserResultCommand } from '@remnawave/backend-contract';
+import { statusLabels } from './admin-display.mjs';
 
 export const directoryPageSize = 8;
 export const nodeUuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const positiveId = value => /^[1-9]\d{0,15}$/.test(String(value)) && Number.isSafeInteger(Number(value));
 const count = value => Number.isSafeInteger(value) && value >= 0;
 const unavailable = () => { throw new Error('ADMIN_UNAVAILABLE'); };
+const queryInput = query => Object.fromEntries(Object.entries(query).map(([key, value]) => [key, typeof value === 'object' ? JSON.stringify(value) : String(value)]));
+function listUser(user) {
+    if (!Number.isSafeInteger(user?.id) || user.id <= 0 || typeof user.username !== 'string' || !/^[A-Za-z0-9_-]{3,36}$/.test(user.username) || !Object.hasOwn(statusLabels, user.status)) return unavailable();
+    return { id: user.id, username: user.username, status: user.status };
+}
 const parsedResponse = (command, value) => {
     const result = command.ResponseSchema.safeParse({ response: value });
     return result.success ? result.data.response : unavailable();
@@ -36,19 +42,44 @@ export function createPanelActions({ read, write }) {
             updatedAt: typeof node.updatedAt === 'string' ? node.updatedAt : null };
     }
     return {
-        async users(page) {
+        async createUser(body) {
+            const validated = CreateUserCommand.RequestBodySchema.parse(body);
+            const result = await write('POST', CreateUserCommand.url, undefined, validated);
+            if (!positiveId(result?.id) || result.username !== body.username || result.expireAt !== new Date(body.expireAt).toISOString()) return unavailable();
+            return { id: result.id, username: result.username };
+        },
+        async squads() {
+            const result = await read('GET', GetInternalSquadsCommand.url);
+            if (!count(result?.total) || !Array.isArray(result.internalSquads) || result.total !== result.internalSquads.length) return unavailable();
+            return result.internalSquads.map(squad => {
+                if (!nodeUuidPattern.test(squad?.uuid) || typeof squad.name !== 'string') return unavailable();
+                return { uuid: squad.uuid, name: squad.name.slice(0, 60) };
+            });
+        },
+        async users(page, { status = 'all', sort = 'id', name } = {}) {
             if (!Number.isSafeInteger(page) || page < 0 || page > Math.floor(Number.MAX_SAFE_INTEGER / directoryPageSize)) throw new Error('ADMIN_INVALID_REFERENCE');
             const start = page * directoryPageSize;
-            const query = { start, size: directoryPageSize, sorting: [{ id: 'id', desc: false }] };
-            GetUsersCommand.RequestQuerySchema.parse(Object.fromEntries(Object.entries(query).map(([key, value]) => [key, typeof value === 'object' ? JSON.stringify(value) : String(value)])));
+            if ((status !== 'all' && !Object.hasOwn(statusLabels, status)) || !['id', 'username', 'expireAt'].includes(sort) || (name !== undefined && !/^[A-Za-z0-9_-]{3,36}$/.test(name))) throw new Error('ADMIN_INVALID_REFERENCE');
+            const query = { start, size: directoryPageSize, sorting: [{ id: sort, desc: false }, ...(sort === 'id' ? [] : [{ id: 'id', desc: false }])] };
+            if (status !== 'all' || name !== undefined) {
+                query.filters = [...(status !== 'all' ? [{ id: 'status', value: status }] : []), ...(name === undefined ? [] : [{ id: 'username', value: name.replaceAll('_', '\\_') }])];
+                query.filterModes = { status: 'equals', username: 'contains' };
+            }
+            GetUsersCommand.RequestQuerySchema.parse(queryInput(query));
             const value = await read('GET', GetUsersCommand.url, query);
             if (!count(value?.total) || !Array.isArray(value.users) || value.users.length !== Math.min(directoryPageSize, Math.max(0, value.total - start))) return unavailable();
-            const users = value.users.map(user => {
-                if (!Number.isSafeInteger(user?.id) || user.id <= 0 || typeof user.username !== 'string' || !/^[A-Za-z0-9_-]{3,36}$/.test(user.username) || !['ACTIVE', 'DISABLED', 'LIMITED', 'EXPIRED'].includes(user.status)) return unavailable();
-                return { id: user.id, username: user.username, status: user.status };
-            });
+            const users = value.users.map(listUser);
+            if (users.some(user => (status !== 'all' && user.status !== status) || (name !== undefined && !user.username.toLowerCase().includes(name.toLowerCase())))) return unavailable();
             if (new Set(users.map(user => user.id)).size !== users.length) return unavailable();
             return { total: value.total, users };
+        },
+        async usersByTelegram(id) {
+            const telegramId = userId(id);
+            const query = { telegramId, size: directoryPageSize };
+            GetUsersStreamCommand.RequestQuerySchema.parse(queryInput(query));
+            const result = await read('GET', GetUsersStreamCommand.url, query);
+            if (!Array.isArray(result?.users) || result.users.length > directoryPageSize || typeof result.hasMore !== 'boolean' || result.users.some(user => user?.telegramId !== telegramId)) return unavailable();
+            return { users: result.users.map(listUser), partial: result.hasMore };
         },
         async nodes() {
             const value = await read('GET', GetNodesCommand.url);
@@ -80,6 +111,16 @@ export function createPanelActions({ read, write }) {
             const body = DeleteUserHwidDeviceCommand.RequestBodySchema.parse({ userId: userId(id), hwid });
             const result = parsedResponse(DeleteUserHwidDeviceCommand, await write('POST', DeleteUserHwidDeviceCommand.url, undefined, body));
             if (result.total !== result.devices.length || result.devices.some(device => device.userId !== body.userId || device.hwid === hwid)) return unavailable();
+        },
+        async clearDevices(id) {
+            const body = DeleteAllUserHwidDevicesCommand.RequestBodySchema.parse({ userId: userId(id) });
+            const result = parsedResponse(DeleteAllUserHwidDevicesCommand, await write('POST', DeleteAllUserHwidDevicesCommand.url, undefined, body));
+            if (result.total !== 0 || result.devices.length !== 0) return unavailable();
+        },
+        async resetTraffic(id) {
+            const target = userId(id);
+            const result = await write('POST', ResetUserTrafficCommand.url(target));
+            if (result?.id !== target || result.userTraffic?.usedTrafficBytes !== 0 || typeof result.lastTrafficResetAt !== 'string') return unavailable();
         },
         async revoke(id, mode, previousShortUuid) {
             if (!['rotate', 'keys'].includes(mode)) throw new Error('ADMIN_INVALID_CHANGE');

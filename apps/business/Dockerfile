@@ -12,6 +12,8 @@ COPY package.json LICENSE ./
 COPY --from=build /build/dist/client.js ./dist/client.js
 COPY --from=build /build/node_modules ./node_modules
 COPY apps/telegram-admin/admin-users.mjs apps/telegram-admin/admin-panel-actions.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/admin-display.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/admin-create.mjs ./apps/telegram-admin/
 COPY apps/business/config.mjs ./apps/business/
 COPY apps/business/billing-admin.mjs ./apps/business/
 COPY apps/business/store.mjs apps/business/portal.mjs apps/business/portal.html apps/business/faq.json apps/business/start.mjs ./apps/business/

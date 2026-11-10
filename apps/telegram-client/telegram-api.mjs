@@ -5,7 +5,7 @@ export class TelegramError extends Error {
     }
 }
 
-export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, signal, enableButtons = false }) {
+export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, signal, enableButtons = false, enableSubscriptionButtons = false }) {
     if (typeof token !== 'string' || !/^[1-9]\d{4,19}:[A-Za-z0-9_-]{30,128}$/.test(token) || !Number.isSafeInteger(allowedUserId) || allowedUserId <= 0)
         throw new TelegramError('INVALID_LOCAL_CONFIGURATION');
 
@@ -60,7 +60,19 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
     }
 
     function safeKeyboard(markup) {
-        return markup && Object.keys(markup).join(',') === 'inline_keyboard' && Array.isArray(markup.inline_keyboard) && markup.inline_keyboard.length <= 15 && markup.inline_keyboard.every(row => Array.isArray(row) && row.length > 0 && row.length <= 3 && row.every(item => item && Object.keys(item).sort().join(',') === 'callback_data,text' && typeof item.text === 'string' && item.text.length > 0 && item.text.length <= 64 && typeof item.callback_data === 'string' && /^[A-Za-z0-9_:-]{1,64}$/.test(item.callback_data)));
+        return markup && Object.keys(markup).join(',') === 'inline_keyboard' && Array.isArray(markup.inline_keyboard) && markup.inline_keyboard.length <= 15 && markup.inline_keyboard.every(row => Array.isArray(row) && row.length > 0 && row.length <= 3 && row.every(safeButton));
+    }
+    function safeButton(item) {
+        if (!item || typeof item.text !== 'string' || item.text.length < 1 || item.text.length > 64) return false;
+        const keys = Object.keys(item).sort().join(',');
+        if (keys === 'callback_data,text') return typeof item.callback_data === 'string' && /^[A-Za-z0-9_:-]{1,64}$/.test(item.callback_data);
+        if (!enableSubscriptionButtons) return false;
+        const link = keys === 'text,url' ? item.url : keys === 'copy_text,text' && item.copy_text && Object.keys(item.copy_text).join(',') === 'text' ? item.copy_text.text : undefined;
+        if (typeof link !== 'string' || link.length > (keys === 'copy_text,text' ? 256 : 2048) || /[\u0000-\u0020\u007f]/.test(link)) return false;
+        try {
+            const address = new URL(link);
+            return address.protocol === 'https:' && !!address.hostname && !address.username && !address.password;
+        } catch { return false; }
     }
 
     return {

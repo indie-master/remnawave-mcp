@@ -3,6 +3,7 @@ import { expiryWindows } from './panel-service.mjs';
 import { reportActions, validateIntent } from './intent.mjs';
 import { resolveLocalRequest } from './local-router.mjs';
 import { extraView } from './extra-views.mjs';
+import { formatTraffic, formatLimit } from './admin-display.mjs';
 
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const button = (text, callback_data) => ({ text, callback_data });
@@ -19,7 +20,7 @@ const extendedMenu = keyboard([
     [button('🧠 Лимит ИИ', 'budget')],
 ]);
 
-export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, adminHandle, adminDirectory = false, extraButtons = [], answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
+export function createDashboard({ allowedUserId, service, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, adminHandle, adminDirectory = false, adminCreate = false, extraButtons = [], answerCallback = async () => {}, onDiagnostic = () => {}, now = Date.now, nonce = () => randomBytes(9).toString('base64url') }) {
     if (!Number.isSafeInteger(allowedUserId) || allowedUserId <= 0) throw new Error('INVALID_ADMIN_ID');
     const reports = new Map();
     const drafts = new Map();
@@ -32,7 +33,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     const back = callback => [button('⬅ Назад', callback)];
     const homeButton = button('🏠 Меню', 'home');
     const statsRows = [[button('👥 Пользователи', 'q:users'), button('🟢 Онлайн', 'q:online')], [button('⚙️ Ресурсы', 'q:system'), button('🩺 Процессы', 'q:health')], [button('📈 Трафик', 'q:bandwidth'), button('ℹ️ Версия', 'q:version')]];
-    const userRows = [[button('📋 Список пользователей', 'aul:0'), button('🔎 Найти пользователя', 'admin_search')], [button('🗒 Операции', 'admin_operations')]];
+    const userRows = [[button('📋 Список пользователей', 'aul:0'), button('🔎 Найти пользователя', 'admin_search')], [button('🟢 Активные', 'aue:ACTIVE'), button('Отключённые', 'aue:DISABLED')], ...(adminCreate ? [[button('➕ Добавить пользователя', 'anew')]] : []), [button('🗒 Операции', 'admin_operations')]];
     const nodeList = [button('📋 Список нод', adminDirectory ? 'anl:0' : 'q:node_details')];
     const parentOf = action => ({ expiring: 'periods', node_details: 'q:nodes', online: 'stats_menu', users: 'stats_menu', system: 'stats_menu', bandwidth: 'stats_menu', health: 'stats_menu', version: 'stats_menu', hosts: 'configuration', profiles: 'configuration', internal_squads: 'configuration', external_squads: 'configuration' })[action] ?? 'home';
     const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
@@ -78,10 +79,10 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
         if (!users.length) lines.push('В проверенной части списка подходящих подписок нет.');
         for (const user of users) {
             const name = service.ownerName?.(user.id) ?? user.username;
-            lines.push(`\n<b>${escapeHtml(name)}</b> · ID ${user.id}`, `Окончание: ${time(user.expireAt)} МСК · осталось ${user.hoursRemaining} ч.`, `Трафик: ${user.trafficUsedBytes === null ? 'нет данных' : (user.trafficUsedBytes / 1073741824).toFixed(2) + ' ГБ'} / ${user.trafficLimitBytes === 0 ? 'без лимита' : user.trafficLimitBytes === null ? 'нет данных' : (user.trafficLimitBytes / 1073741824).toFixed(2) + ' ГБ'}`, `Telegram: ${user.telegramLinked ? 'привязан; возможность доставки не проверена' : 'не привязан'}`);
+            lines.push(`\n<b>${escapeHtml(name)}</b> · ID ${user.id}`, `Окончание: ${time(user.expireAt)} МСК · осталось ${user.hoursRemaining} ч.`, `Трафик: ${formatTraffic(user.trafficUsedBytes)} / ${formatLimit(user.trafficLimitBytes)}`, `Telegram: ${user.telegramLinked ? 'привязан; возможность доставки не проверена' : 'не привязан'}`);
         }
         lines.push(`\nПроверено: ${time(report.observedAt)} МСК.\nУведомления клиентам <b>не отправляются</b>.`);
-        const rows = users.map((user, index) => [button(`📝 Черновик для #${user.id}`, `draft:${key}:${page * 5 + index}`)]);
+        const rows = users.map((user, index) => [button(`📝 Черновик для #${user.id}`, `draft:${key}:${page * 5 + index}`), ...(adminDirectory ? [button('👤 Карточка', `au:${user.id}`)] : [])]);
         const navigation = [];
         if (page > 0) navigation.push(button('←', `page:${key}:${page - 1}`));
         if (page + 1 < pages) navigation.push(button('→', `page:${key}:${page + 1}`));

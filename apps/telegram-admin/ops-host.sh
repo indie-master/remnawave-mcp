@@ -105,19 +105,19 @@ cleanup() {
 }
 
 offline_validate() {
-    local kind=$1 file=$2
+    local kind=$1 file=$2 image=${3:-panel-admin-bot:local}
     docker_local run --rm --pull never --network none --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true --memory 128m --memory-swap 128m --cpus 0.25 --pids-limit 32 \
-        --mount "type=bind,src=$file,dst=/configuration.env,readonly" --entrypoint node panel-admin-bot:local /app/apps/telegram-admin/ops-config.mjs "$kind" /configuration.env
+        --mount "type=bind,src=$file,dst=/configuration.env,readonly" --entrypoint node "$image" /app/apps/telegram-admin/ops-config.mjs "$kind" /configuration.env
 }
 
 check_file() {
-    local kind=$1 file=$2
+    local kind=$1 file=$2 image=${3:-panel-admin-bot:local}
     private_file "$file"
     DRAFT=$(mktemp "$OPS/check.XXXXXXXX")
     cp -- "$file" "$DRAFT" || return
     chown 1000:1000 "$DRAFT" || return
     chmod 0400 "$DRAFT" || return
-    offline_validate "$kind" "$DRAFT" || return
+    offline_validate "$kind" "$DRAFT" "$image" || return
     rm -f -- "$DRAFT"; DRAFT=''
 }
 
@@ -238,6 +238,12 @@ prepare_rollback() {
     read_record "$OPS/previous.env"
     [[ "$AI_MODE" != true || "$AI_IMAGE" != none ]] || fail 'Предыдущая ревизия без ai. Сначала явно измените режим в settings.'
     git -C "$REPO" cat-file -e "$REVISION:apps/telegram-admin/botctl" || fail 'Для этой старой ревизии нужен ручной откат по инструкции.'
+    local previous_image="panel-admin-bot:checkpoint-${BOT_IMAGE#sha256:}"
+    docker_local image inspect "$previous_image" >/dev/null 2>&1 || previous_image=$BOT_IMAGE
+    docker_local image inspect "$previous_image" >/dev/null || fail 'Предыдущий образ недоступен.'
+    check_file base "$APP/.env" "$previous_image" || fail 'Настройки несовместимы с предыдущим образом. Исходники и контейнеры не менялись.'
+    check_file controls "$OPS/settings.env" "$previous_image" || fail 'Настройки несовместимы с предыдущим образом. Исходники и контейнеры не менялись.'
+    [[ ! -e "$APP/.env.extensions" ]] || check_file extensions "$APP/.env.extensions" "$previous_image" || fail 'Для отката удалите новые ключи и поля из extensions, затем повторите rollback. Исходники и контейнеры не менялись.'
     retag_record || fail 'Образы отката недоступны. Контейнеры и исходники не менялись.'
     optional_service business stop; optional_service voice stop; optional_service media stop
     git -C "$REPO" checkout --detach "$REVISION" >/dev/null 2>&1
