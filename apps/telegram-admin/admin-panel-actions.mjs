@@ -45,7 +45,11 @@ export function createPanelActions({ read, write }) {
         async createUser(body) {
             const validated = CreateUserCommand.RequestBodySchema.parse(body);
             const result = await write('POST', CreateUserCommand.url, undefined, validated);
-            if (!positiveId(result?.id) || result.username !== body.username || result.expireAt !== new Date(body.expireAt).toISOString()) return unavailable();
+            const fields = ['username', 'status', 'trafficLimitBytes', 'trafficLimitStrategy', 'hwidDeviceLimit', 'telegramId'];
+            const matches = fields.every(field => validated[field] === undefined || result?.[field] === validated[field]);
+            const groupIds = Array.isArray(result?.activeInternalSquads) ? result.activeInternalSquads.map(squad => squad?.uuid) : undefined;
+            const requested = [...(validated.activeInternalSquads ?? [])].sort();
+            if (!positiveId(result?.id) || !matches || result.expireAt !== new Date(body.expireAt).toISOString() || !Array.isArray(groupIds) || JSON.stringify([...groupIds].sort()) !== JSON.stringify(requested)) return unavailable();
             return { id: result.id, username: result.username };
         },
         async squads() {

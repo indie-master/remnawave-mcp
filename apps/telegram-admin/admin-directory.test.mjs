@@ -17,7 +17,7 @@ const start = Date.parse('2035-01-01T00:00:00.000Z');
 const observedAt = new Date(start).toISOString();
 const url = 'https://subscription.example.invalid/synthetic-private-path';
 
-function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = false, creationEnabled = false, destructive = false, squadEdit = false, naming = {}, clock = start } = {}) {
+function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = false, unboundCreation = false, creationEnabled = false, destructive = false, squadEdit = false, naming = {}, clock = start } = {}) {
     const directory = mkdtempSync(join(tmpdir(), 'panel-directory-'));
     const readTokenFile = join(directory, 'read.txt');
     const writeTokenFile = join(directory, 'write.txt');
@@ -54,7 +54,12 @@ function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = fals
                 }
                 return reply(user);
             }
-            if (path === '/api/users/' && method === 'POST') { const created = { ...body, id: 60 }; users.push(created); return reply(created); }
+            if (path === '/api/users/' && method === 'POST') {
+                const created = { ...body, id: 60, activeInternalSquads: internalGroups.filter(group => body.activeInternalSquads.includes(group.uuid)) };
+                if (unboundCreation) created.telegramId = null;
+                users.push(created);
+                return reply(created);
+            }
             if (path === '/api/nodes/' && method === 'PATCH') return reply(Object.assign(node, body));
             if (path === `/api/users/${user.id}/actions/revoke` && method === 'POST') {
                 user.subRevokedAt = new Date(now).toISOString();
@@ -497,5 +502,14 @@ test('an uncertain squad write is not repeated and rejects memberships changed a
     const second = await state.administration.prepareSquads(actor, '48', { activeInternalSquads: [nodeUuid] }, view.baseline);
     state.user.externalSquadUuid = state.externalGroups[0].uuid;
     await assert.rejects(state.administration.confirm(actor, second.id), /ADMIN_STALE/);
+    assert.equal(state.writes.length, 1);
+});
+
+test('creation cannot report success if the panel response omits the requested Telegram binding', async t => {
+    const state = fixture(t, { creationEnabled: true, unboundCreation: true });
+    const ticket = await state.administration.prepareCreate(actor, { username: 'example_binding', days: 3, trafficLimitBytes: 16 * 1024 ** 3, trafficLimitStrategy: 'DAY', hwidDeviceLimit: 4, activeInternalSquads: [nodeUuid], telegramId: 76543210 });
+    await assert.rejects(state.administration.confirm(actor, ticket.id));
+    assert.equal(state.administration.receipt(actor, ticket.id), 'uncertain');
+    await assert.rejects(state.administration.confirm(actor, ticket.id), /ADMIN_CONFIRMATION_EXPIRED/);
     assert.equal(state.writes.length, 1);
 });
