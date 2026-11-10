@@ -1,9 +1,10 @@
 import { request } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { createSupportInbox } from './support-inbox.mjs';
 
 export function createBusinessClient({ requestImpl = request } = {}) {
     return (path, value) => new Promise((resolve, reject) => {
-        if (!['/pending', '/approve', '/reject', '/support-reply', '/renewal-reserve', '/renewal-settle', '/media-approve', '/recovery', '/billing-history', '/renewal-reconcile'].includes(path) && !/^\/(?:support|media|recovery)\/[a-f0-9]{24}$/.test(path)) { reject(new Error('BUSINESS_UNAVAILABLE')); return; }
+        if (!['/pending', '/approve', '/reject', '/support-reply', '/support-message', '/support-close', '/renewal-reserve', '/renewal-settle', '/media-approve', '/recovery', '/billing-history', '/renewal-reconcile'].includes(path) && !/^\/(?:support|media|recovery)\/[a-f0-9]{24}$/.test(path)) { reject(new Error('BUSINESS_UNAVAILABLE')); return; }
         const call = requestImpl({ socketPath: '/business-bridge/admin.sock', method: value === undefined ? 'GET' : 'POST', path, headers: { 'Content-Type': 'application/json' }, timeout: path === '/media-approve' ? 55000 : 5000 }, response => {
             let body = ''; response.on('data', chunk => { body += chunk; if (body.length > 16384) response.destroy(); });
             response.on('error', () => reject(new Error('BUSINESS_UNAVAILABLE')));
@@ -15,10 +16,14 @@ export function createBusinessClient({ requestImpl = request } = {}) {
 export function createBusinessAdmin({ actorId, administration, call = createBusinessClient(), now = Date.now }) {
     if (!Number.isSafeInteger(actorId) || actorId <= 0) throw new Error('INVALID_ADMIN_ID');
     const previews = new Map();
+    const inbox = createSupportInbox({ actorId, call, now });
     const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
     const reply = (text, rows = [], parent = 'business_home') => ({ text, reply_markup: { inline_keyboard: rows.some(row => row.some(button => button.text === 'Назад')) ? rows : [...rows, [{ text: 'Назад', callback_data: parent }]] } });
-    return async ({ text, data, allowedUserId }) => {
+    const handle = async request => {
+        const { text, data, allowedUserId } = request;
         if (allowedUserId !== actorId) return null;
+        const support = await inbox.handle(request);
+        if (support) return support;
         const supportReply = text?.match(/^ответ\s+([a-f0-9]{24})\s+([\s\S]{1,1000})$/i);
         const paymentReference = text?.match(/^плат[её]ж\s+([a-f0-9]{24})\s+([A-Za-z][A-Za-z0-9_-]{1,19}:[A-Za-z0-9:_-]{4,100})$/i);
         const reconciliation = text?.match(/^сверка\s+([a-f0-9]{24})\s+(выполнено|возврат)\s+([^\r\n]{8,200})$/i);
@@ -60,11 +65,6 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
                 return reply('✅ Сверка зафиксирована в журнале. ' + (value.outcome === 'done' ? 'Продление отмечено выполненным.' : 'Резерв возвращён на баланс один раз.') + ' Запрос к панели не отправлялся.');
             }
             if (supportReply) { await call('/support-reply', { id: supportReply[1], text: supportReply[2] }); return reply('Ответ сохранён в истории кабинета клиента. В Telegram клиенту ничего не отправлялось.'); }
-            if (data?.startsWith('bh:')) {
-                const thread = await call('/support/' + data.slice(3));
-                if (!Array.isArray(thread.history)) throw new Error();
-                return reply(`<b>Обращение ${escape(thread.id)}</b>\n${thread.history.slice(-6).map(item => `${item.role === 'user' ? 'Клиент' : 'Поддержка'}: ${escape(String(item.text).slice(0, 300))}`).join('\n\n')}\n\nОтветить: <code>ответ ${escape(thread.id)} текст ответа</code>`, [...(thread.media ?? []).filter(item => /^[a-f0-9]{24}$/.test(item.id)).slice(0, 5).map(item => [{ text: '📷 Проверить текст вложения', callback_data: `bm:${item.id}` }]), [{ text: '🏠 Меню', callback_data: 'home' }]]);
-            }
             if (data?.startsWith('bm:')) {
                 const media = await call('/media/' + data.slice(3));
                 const key = randomBytes(12).toString('base64url');
@@ -129,4 +129,6 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
             return reply(`<b>Оплаты: ${payments.length}</b>\nПоказаны кнопки первых 10; после подтверждения обновите список.\nПодтверждение только после проверки поступления.\n\n<b>Заявки продления: ${renewals.length}</b>\nПродление и списание требуют отдельного подтверждения.`, [...payments.slice(0, 10).map(value => [{ text: `${value.currency} ${value.units / (value.currency === 'RUB' ? 100 : 1000000)} · ${value.id.slice(0, 6)}`, callback_data: `bp:${value.id}` }]), [{ text: '⏳ Продления', callback_data: 'business_renewals' }], ...(pending.features?.reconciliation === true ? [[{ text: '🔎 Ручная сверка', callback_data: 'business_recovery' }, { text: '🗒 Журнал', callback_data: 'business_history' }]] : []), [{ text: '🛟 Обращения поддержки', callback_data: 'business_support' }]], 'home');
         } catch { return reply('Бизнес-модуль недоступен. Подтверждение оплаты не повторяется автоматически.', [], data === 'business_home' ? 'home' : 'business_home'); }
     };
+    handle.delivered = inbox.delivered;
+    return handle;
 }

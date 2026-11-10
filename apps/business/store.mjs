@@ -21,6 +21,7 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
         CREATE TABLE IF NOT EXISTS knowledge (id TEXT PRIMARY KEY, aliases TEXT NOT NULL, answer TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS private_cache (account TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(account,question));
         CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, account TEXT NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS support_receipts (key TEXT PRIMARY KEY, ticket TEXT NOT NULL, body_hash TEXT NOT NULL, created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS renewal_requests (id TEXT PRIMARY KEY, account TEXT NOT NULL, state TEXT NOT NULL, created INTEGER NOT NULL, currency TEXT NOT NULL, units INTEGER NOT NULL, days INTEGER NOT NULL, proposal TEXT);
         CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS search_cache (key TEXT PRIMARY KEY, result TEXT NOT NULL, expires INTEGER NOT NULL);
@@ -189,6 +190,8 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
             database.prepare('DELETE FROM messages WHERE account=? AND id NOT IN (SELECT id FROM messages WHERE account=? ORDER BY id DESC LIMIT 100)').run(id, id);
         },
         history(id) { account(id); return database.prepare('SELECT role,text FROM messages WHERE account=? AND created>? ORDER BY id DESC LIMIT 6').all(id, now() - 30 * 86400000).reverse().map(value => ({ role: value.role, text: value.text.slice(0, 300) })); },
+        supportHistory(id) { account(id); return database.prepare('SELECT role,text FROM messages WHERE account=? AND created>? ORDER BY id DESC LIMIT 50').all(id, now() - 30 * 86400000).reverse().map(value => ({ role: value.role, text: value.text })); },
+        openSupport(id) { account(id); return database.prepare('SELECT id FROM handoffs WHERE account=? AND state=?').get(id, 'pending')?.id; },
         handoff(id) {
             account(id);
             const existing = database.prepare('SELECT id FROM handoffs WHERE account=? AND state=?').get(id, 'pending');
@@ -197,9 +200,31 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
         },
         pendingSupport() { return database.prepare('SELECT handoff.id,account.panel_id FROM handoffs handoff JOIN accounts account ON account.id=handoff.account WHERE handoff.state=? ORDER BY handoff.created LIMIT 20').all('pending'); },
         supportThread(id) {
-            const row = database.prepare('SELECT account FROM handoffs WHERE id=? AND state=?').get(id, 'pending');
+            const row = database.prepare('SELECT handoff.account,account.panel_id FROM handoffs handoff JOIN accounts account ON account.id=handoff.account WHERE handoff.id=? AND handoff.state=?').get(id, 'pending');
             if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-            return { id, history: api.history(row.account), media: database.prepare('SELECT id,text FROM media_reviews WHERE account=? AND state=? ORDER BY created LIMIT 5').all(row.account, 'pending') };
+            const latest = database.prepare('SELECT coalesce(max(id),0) AS value FROM messages WHERE account=?').get(row.account).value;
+            return { id, panelId: row.panel_id, version: hash(row.account + ':' + latest).slice(0, 24), history: api.history(row.account), media: database.prepare('SELECT id,text FROM media_reviews WHERE account=? AND state=? ORDER BY created LIMIT 5').all(row.account, 'pending') };
+        },
+        supportMessage(id, key, text) {
+            if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id) || typeof key !== 'string' || !/^[a-f0-9]{32}$/.test(key) || typeof text !== 'string' || !text.trim() || text.length > 500) throw new Error('INVALID_MESSAGE');
+            return transact(() => {
+                const digest = hash(text);
+                const previous = database.prepare('SELECT ticket,body_hash FROM support_receipts WHERE key=?').get(key);
+                if (previous) { if (previous.ticket !== id || previous.body_hash !== digest) throw new Error('INVALID_MESSAGE'); return { recorded: true, replayed: true }; }
+                const row = database.prepare('SELECT account FROM handoffs WHERE id=? AND state=?').get(id, 'pending');
+                if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
+                api.append(row.account, 'assistant', text);
+                database.prepare('INSERT INTO support_receipts VALUES (?,?,?,?)').run(key, id, digest, now());
+                return { recorded: true };
+            });
+        },
+        closeSupport(id, version) {
+            if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id) || typeof version !== 'string' || !/^[a-f0-9]{24}$/.test(version)) throw new Error('INVALID_MESSAGE');
+            return transact(() => {
+                if (api.supportThread(id).version !== version) throw new Error('SUPPORT_THREAD_CHANGED');
+                const result = database.prepare('UPDATE handoffs SET state=? WHERE id=? AND state=?').run('resolved', id, 'pending');
+                return { closed: result.changes === 1 };
+            });
         },
         replySupport(id, text) {
             if (typeof text !== 'string' || !text.trim() || text.length > 1000) throw new Error('INVALID_MESSAGE');
@@ -267,10 +292,19 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
 }
 
 export function createSupport({ store, answer, search, now = Date.now }) {
-    let busy = false; const rate = new Map();
+    let busy = false; const rate = new Map(); const chatRate = new Map();
     return async (accountId, question) => {
         if (typeof question !== 'string' || !question.trim() || question.length > 500) throw new Error('INVALID_MESSAGE');
         const sanitized = redactSupport(question);
+        if (store.openSupport(accountId)) {
+            while (chatRate.size > 1000) chatRate.delete(chatRate.keys().next().value);
+            let window = chatRate.get(accountId);
+            if (!window || now() < window.at || now() - window.at >= 60000) { window = { at: now(), count: 0 }; chatRate.set(accountId, window); }
+            if (window.count >= 10) throw new Error('SUPPORT_RATE_LIMIT');
+            window.count++;
+            store.append(accountId, 'user', sanitized);
+            return { reply: 'Сообщение добавлено в вашу переписку с поддержкой.', source: 'human', needsHuman: true };
+        }
         const known = store.knowledge(sanitized);
         const cached = store.cached(accountId, sanitized);
         if (known.length || cached) {
@@ -304,7 +338,7 @@ export function createSupport({ store, answer, search, now = Date.now }) {
             return { ...result, reply, source: 'ai' };
         } catch {
             store.handoff(accountId);
-            const reply = 'Передано администратору. Укажите приложение, систему и текст ошибки, но не присылайте пароль, токен или ссылку подписки.';
+            const reply = 'Обращение передано администратору. Ответ появится здесь.';
             store.append(accountId, 'assistant', reply);
             return { reply, source: 'human', needsHuman: true };
         } finally { busy = false; }

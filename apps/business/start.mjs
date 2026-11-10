@@ -8,6 +8,7 @@ import { createMediaAnalyzer } from './media-client.mjs';
 import { validateBusinessEnv } from './config.mjs';
 import { createGuideLibrary } from './guides.mjs';
 import { createBillingAdministration } from './billing-admin.mjs';
+import { createSupportAdministration } from './support-admin.mjs';
 
 let store; let portal; let administration;
 try {
@@ -36,14 +37,15 @@ portal = createPortal({ store, support, origin: process.env.PORTAL_PUBLIC_ORIGIN
 const socket = '/business-bridge/admin.sock';
 if (existsSync(socket)) { if (!statSync(socket).isSocket()) throw new Error('INVALID_BUSINESS_SOCKET'); unlinkSync(socket); }
 const billingAdministration = createBillingAdministration({ store, enabled: manualBilling });
+const supportAdministration = createSupportAdministration({ store });
 administration = createServer(async (incoming, outgoing) => {
     const send = (status, value) => outgoing.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
     try {
         if (await billingAdministration(incoming, outgoing)) return;
+        if (await supportAdministration(incoming, outgoing)) return;
         if (incoming.method === 'GET' && incoming.url === '/pending') { send(200, { payments: store.pendingPayments(), renewals: store.pendingRenewals(), support: store.pendingSupport(), features: { reconciliation: manualBilling && store.reconciliationEnabled } }); return; }
-        if (incoming.method === 'GET' && /^\/support\/[a-f0-9]{24}$/.test(incoming.url)) { send(200, store.supportThread(incoming.url.split('/').at(-1))); return; }
         if (incoming.method === 'GET' && /^\/media\/[a-f0-9]{24}$/.test(incoming.url)) { send(200, store.mediaReview(incoming.url.split('/').at(-1))); return; }
-        if (incoming.method !== 'POST' || !['/approve', '/reject', '/support-reply', '/renewal-reserve', '/renewal-settle', '/media-approve'].includes(incoming.url) || incoming.headers['content-type'] !== 'application/json') throw new Error();
+        if (incoming.method !== 'POST' || !['/approve', '/reject', '/renewal-reserve', '/renewal-settle', '/media-approve'].includes(incoming.url) || incoming.headers['content-type'] !== 'application/json') throw new Error();
         if (['/approve', '/reject', '/renewal-reserve', '/renewal-settle'].includes(incoming.url) && !manualBilling) throw new Error();
         let body = ''; for await (const chunk of incoming) { body += chunk; if (body.length > 4096) throw new Error(); }
         const value = JSON.parse(body);
@@ -61,10 +63,6 @@ administration = createServer(async (incoming, outgoing) => {
         if (incoming.url === '/renewal-settle') {
             if (!value || Object.keys(value).sort().join(',') !== 'id,outcome' || !/^[a-f0-9]{24}$/.test(value.id)) throw new Error();
             send(200, store.settleRenewal(value.id, value.outcome)); return;
-        }
-        if (incoming.url === '/support-reply') {
-            if (!value || Object.keys(value).sort().join(',') !== 'id,text' || !/^[a-f0-9]{24}$/.test(value.id)) throw new Error();
-            send(200, store.replySupport(value.id, value.text)); return;
         }
         if (!value || !/^[a-f0-9]{24}$/.test(value.id) || (incoming.url === '/approve' ? Object.keys(value).sort().join(',') !== 'id,reference' : Object.keys(value).join(',') !== 'id')) throw new Error();
         if (incoming.url === '/approve') send(200, store.approvePayment(value.id, value.reference));

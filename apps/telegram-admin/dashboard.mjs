@@ -37,7 +37,7 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
     const userRows = [[button('📋 Список пользователей', 'aul:0'), button('🔎 Найти пользователя', 'admin_search')], [button('🟢 Активные', 'aue:ACTIVE'), button('Отключённые', 'aue:DISABLED')], ...(adminCreate ? [[button('➕ Добавить пользователя', 'anew')]] : []), [button('🗒 Операции', 'admin_operations')]];
     const nodeList = [button('📋 Список нод', adminDirectory ? 'anl:0' : 'q:node_details')];
     const parentOf = action => ({ expiring: 'periods', node_details: 'q:nodes', online: 'stats_menu', users: 'stats_menu', system: 'stats_menu', bandwidth: 'stats_menu', health: 'stats_menu', version: 'stats_menu', hosts: 'configuration', profiles: 'configuration', internal_squads: 'configuration', external_squads: 'configuration' })[action] ?? 'home';
-    const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup });
+    const reply = (text, reply_markup = enhancedUi ? extendedMenu : menu, supportContext) => ({ chat_id: allowedUserId, text, protect_content: true, parse_mode: 'HTML', reply_markup, ...(supportContext ? { supportContext } : {}) });
     const home = () => reply('<b>Панель управления</b>\nКнопки — без ИИ. ' + (textModeDescription ?? (classify && mcpRead ? 'Текстовый вопрос — через Codex и MCP.' : 'ИИ в этом запуске отключён; используйте кнопки.')) + '\nУведомления: только черновики администратору.', keyboard([...(enhancedUi ? extendedMenu : menu).inline_keyboard, ...extraButtons]));
     function clarification(topic, recognizedText) {
         const rows = topic === 'period'
@@ -157,8 +157,8 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
                 onDiagnostic({ event: 'voice_intent', source: 'confirmation', ok: true });
             }
             if (adminHandle && !voiceApproved) {
-                const result = await adminHandle({ text, data, allowedUserId });
-                if (result) { context = undefined; return reply(result.text, result.reply_markup); }
+                const result = await adminHandle({ text, data, allowedUserId, updateId: update.update_id, inputSource: update.inputSource, telegramReply: !callback && !!message.reply_to_message, replyToMessageId: !callback && Number.isSafeInteger(message.reply_to_message?.message_id) ? message.reply_to_message.message_id : undefined });
+                if (result) { context = undefined; return reply(result.text, result.reply_markup, result.supportContext); }
             }
             if (/^(?:плат[её]ж|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) return reply('Бизнес-модуль или это действие не включены. Запрос к ИИ не выполнялся.');
             if (data === 'home' || ['/start', '/help', '/menu'].includes(text)) return home();

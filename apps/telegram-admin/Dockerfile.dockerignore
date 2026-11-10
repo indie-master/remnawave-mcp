@@ -40,6 +40,7 @@
 !apps/telegram-admin/admin-identity.mjs
 !apps/telegram-admin/admin-squads.mjs
 !apps/telegram-admin/business-client.mjs
+!apps/telegram-admin/support-inbox.mjs
 !apps/telegram-admin/state-transfer.mjs
 !apps/telegram-admin/admin-mcp.mjs
 !apps/telegram-admin/start-admin-mcp.mjs

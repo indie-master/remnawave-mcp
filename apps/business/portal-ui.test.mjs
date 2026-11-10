@@ -14,14 +14,15 @@ function browser(account) {
     }
     const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(value => [value[1], new Element(value[1])]));
     const buttons = [...html.matchAll(/<button(?: id="([^"]+)")?/g)].map(value => elements[value[1]] ?? new Element());
-    const calls = []; let next;
-    const context = createContext({ document: { getElementById: id => elements[id], createElement: () => new Element(), querySelectorAll: () => buttons, body: new Element() }, location: { reload() {} }, URL, fetch: async (path, options) => {
+    const calls = []; let next; let poll;
+    const document = { visibilityState: 'visible', getElementById: id => elements[id], createElement: () => new Element(), querySelectorAll: () => buttons, body: new Element() };
+    const context = createContext({ document, setInterval: (callback, milliseconds) => { assert.equal(milliseconds, 5000); poll = callback; }, location: { reload() {} }, URL, fetch: async (path, options) => {
         calls.push({ path, options });
         if (next) { const reply = next; next = undefined; return reply; }
         return { ok: true, json: async () => account };
     } });
     new Script(source).runInContext(context);
-    return { elements, calls, respond: response => { next = response; }, settle: () => new Promise(setImmediate) };
+    return { elements, calls, document, poll: () => poll(), respond: response => { next = response; }, settle: () => new Promise(setImmediate) };
 }
 const account = (features, plans = []) => ({ email: 'pilot@example.invalid', csrf: 'synthetic-csrf', balances: { RUB: 0, USDT: 0 }, payments: [], renewals: [], history: [], features, plans });
 
@@ -32,6 +33,22 @@ test('customer screen hides disabled billing and panel actions without losing lo
     assert.equal(page.elements.renew.disabled, true);
     assert.equal(typeof page.elements.supportForm.onsubmit, 'function');
     assert.equal(page.calls.length, 1);
+});
+
+test('visible customer chat receives native answers without reloading or reading panel data', async () => {
+    const page = browser(account({ billing: false, panel: false, media: false })); await page.settle();
+    page.respond({ ok: true, json: async () => ({ state: 'open', history: [{ role: 'assistant', text: '<Ответ администратора>' }] }) });
+    await page.poll();
+    assert.equal(page.calls.at(-1).path, '/api/support');
+    assert.equal(page.elements.history.children[0].children[1].textContent, '<Ответ администратора>');
+    assert.match(page.elements.supportState.textContent, /открыт/);
+    assert.equal(page.calls.filter(value => value.path === '/api/subscription').length, 0);
+    page.document.visibilityState = 'hidden'; const count = page.calls.length;
+    await page.poll(); assert.equal(page.calls.length, count);
+    page.document.visibilityState = 'visible';
+    page.respond({ ok: false, json: async () => ({ code: 'SESSION_EXPIRED' }) });
+    await page.poll(); assert.equal(page.elements.history.children.length, 0);
+    await page.poll(); assert.equal(page.calls.length, count + 1);
 });
 
 test('customer renewal sends the displayed quote once and expired sessions remove private content', async () => {

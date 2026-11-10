@@ -9,7 +9,7 @@ const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     signal?.addEventListener('abort', finish, { once: true });
 });
 
-export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, autoMenu = false, voiceInput, adminHandle, adminDirectory = false, adminCreate = false, extraButtons = [], aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
+export async function runServerBot({ api, service, allowedUserId, botUsername, classify, mcpRead, budgetStatus, textModeDescription, enhancedUi = false, autoMenu = false, voiceInput, adminHandle, onReplyDelivery = () => {}, adminDirectory = false, adminCreate = false, extraButtons = [], aiEnabled = false, soleReceiverConfirmed = false, continuous = false, seconds = 900, signal, now = Date.now, sleep = sleepDefault, loadOffset = () => undefined, saveOffset = () => {}, heartbeat = () => {}, onEvent = () => {}, onReady = () => {}, sendFinal = payload => api.sendReply(payload) }) {
     if (soleReceiverConfirmed !== true || typeof continuous !== 'boolean' || !Number.isInteger(seconds) || seconds < 60 || seconds > 900) throw new Error('LIVE_START_NOT_AUTHORIZED');
     const result = { status: 'stopped', reason: null, replies: 0, polls: 0, startedAt: null, stoppedAt: null };
     let ready = false;
@@ -36,7 +36,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
             return mcpRead(action, days);
         } : undefined;
         const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, adminHandle, adminDirectory, adminCreate, extraButtons, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
-        const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, collapsible: autoMenu, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
+        const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, collapsible: autoMenu, onDelivery: onReplyDelivery, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
         await api.sendReply(notification(continuous
             ? 'Бот запущен на сервере. Кнопки работают без ИИ. Отправка клиентам отключена.'
             : `Тест бота начался на ${seconds / 60} мин. Остановка: ${new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', timeStyle: 'medium' }).format(new Date(deadline))} МСК. Кнопки работают без ИИ, отправка клиентам отключена.`));
@@ -72,7 +72,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
                     if (menuSession) result.replies += await menuSession.process(input);
                     else {
                         const reply = await handle(input);
-                        if (reply && !signal?.aborted && now() < deadline) { await api.sendReply(reply); result.replies++; }
+                        if (reply && !signal?.aborted && now() < deadline) { const { supportContext, ...payload } = reply; const delivered = await api.sendReply(payload); onReplyDelivery(supportContext, delivered); result.replies++; }
                     }
                 } catch (error) {
                         if (signal?.aborted) break;

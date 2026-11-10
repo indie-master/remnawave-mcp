@@ -22,6 +22,7 @@
 !apps/business/faq.json
 !apps/business/start.mjs
 !apps/business/billing-admin.mjs
+!apps/business/support-admin.mjs
 !apps/business/account-cli.mjs
 !apps/business/reference-search.mjs
 !apps/business/media-client.mjs

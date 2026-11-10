@@ -38,6 +38,11 @@ test('portal login/CSRF/Host/account isolation and payment workflow use only syn
         const otherLogin = await call('/api/login', { email: 'second@example.invalid', password: 'synthetic-password-only' });
         const otherCookie = otherLogin.headers.get('set-cookie').split(';')[0];
         assert.deepEqual((await (await call('/api/account', undefined, { Cookie: otherCookie })).json()).renewals, []);
+        store.append(first, 'assistant', 'Ответ только первому аккаунту');
+        const privateChat = await (await call('/api/support', undefined, headers)).json();
+        assert.equal(privateChat.history.at(-1).text, 'Ответ только первому аккаунту');
+        assert.deepEqual((await (await call('/api/support', undefined, { Cookie: otherCookie })).json()).history, []);
+        assert.equal((await call('/api/support?account=' + first, undefined, { Cookie: otherCookie })).status, 404);
         assert.equal((await call('/recovery/' + renewal.id, undefined, headers)).status, 404);
         assert.equal((await call('/api/payments', { currency: 'RUB', amount: '1', account: second }, headers)).status, 400);
         assert.equal((await call('/api/subscription', undefined, headers)).status, 200);

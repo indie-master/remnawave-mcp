@@ -5,11 +5,11 @@
 <main id="account" class="hidden"><section><h2>Ваш аккаунт</h2><pre id="details"></pre><button id="subscription" class="hidden">Проверить подписку</button><button id="logout">Выйти</button><pre id="subscriptionDetails"></pre></section>
 <section id="renewalSection" class="hidden"><h2>Продление подписки</h2><p>Выберите тариф. Заявку проверит администратор перед продлением и списанием баланса.</p><label>Тариф <select id="renewalPlan" aria-label="Тариф продления"></select></label><p id="planDetails"></p><button id="renew" disabled>Подать заявку на продление</button><h2>Ваши заявки</h2><pre id="renewals"></pre><small>Если результат ещё проверяется, дождитесь ответа администратора.</small></section>
 <section id="paymentSection" class="hidden"><h2>Пополнение баланса</h2><p>Поступление проверяет администратор. Заявка сама по себе не зачисляет деньги.</p><form id="paymentForm"><label>Валюта <select id="currency"><option>RUB</option><option>USDT</option></select></label><label>Сумма<input id="amount" inputmode="decimal" placeholder="Сумма" required></label><button>Создать заявку</button></form><pre id="payments"></pre></section>
-<section><h2>Поддержка</h2><p>Не отправляйте пароли, токены и ссылки подписки. История доступна только вашему аккаунту.</p><pre id="history"></pre><form id="supportForm"><textarea id="question" maxlength="500" required placeholder="Приложение, система и описание проблемы"></textarea><button>Отправить</button></form><div id="sources"></div><form id="mediaForm" class="hidden"><p>Если обращение передано администратору, можно приложить скриншот или короткое MP4 до 30 секунд. Скройте секреты заранее. Файл обрабатывается локально и удаляется; модели может передаваться только очищенный текст.</p><input id="mediaFile" type="file" accept="image/png,image/jpeg,video/mp4" required><button>Приложить к обращению</button></form><button id="erase">Удалить историю</button></section></main><pre id="status" role="status"></pre>
+<section><h2>Поддержка</h2><p>Не отправляйте пароли, токены и ссылки подписки. История доступна только вашему аккаунту.</p><small id="supportState" role="status"></small><div id="history" class="messages" role="log" aria-live="polite" aria-label="Переписка с поддержкой"></div><form id="supportForm"><textarea id="question" maxlength="500" required placeholder="Напишите сообщение поддержке"></textarea><button>Отправить</button></form><div id="sources"></div><form id="mediaForm" class="hidden"><p>Если обращение передано администратору, можно приложить скриншот или короткое MP4 до 30 секунд. Скройте секреты заранее. Файл обрабатывается локально и удаляется; модели может передаваться только очищенный текст.</p><input id="mediaFile" type="file" accept="image/png,image/jpeg,video/mp4" required><button>Приложить к обращению</button></form><button id="erase">Удалить историю</button></section></main><pre id="status" role="status"></pre>
 <section id="guideSection" class="hidden"><h2>Иллюстрации подключения</h2><button id="showGuides">Открыть проверенные инструкции</button><div id="guideImages"></div></section>
-<style nonce="__NONCE__">#guideImages img{max-width:100%;border-radius:12px}#sources a{color:#aecfff}</style>
+<style nonce="__NONCE__">#guideImages img{max-width:100%;border-radius:12px}#sources a{color:#aecfff}.messages{display:flex;flex-direction:column;gap:12px;max-height:480px;overflow:auto;margin:18px 0}.message{max-width:85%;padding:14px 18px;border-radius:16px;background:#25394f;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}.message strong{display:block;font-size:13px;margin-bottom:5px;color:#aecfff}.message.mine{align-self:flex-end;background:#27476a}.message.theirs{align-self:flex-start}</style>
 <script nonce="__NONCE__">
-let csrf; let plans = []; let busy = false;
+let csrf; let plans = []; let busy = false; let historyStamp; let supportPolling = false;
 const element = id => document.getElementById(id);
 const money = (units, currency) => (units / (currency === 'RUB' ? 100 : 1000000)).toLocaleString('ru-RU', { minimumFractionDigits: currency === 'RUB' ? 2 : 0, maximumFractionDigits: currency === 'RUB' ? 2 : 6 }) + ' ' + currency;
 const states = { pending: 'Ожидает проверки', executing: 'Выполняется', uncertain: 'Проверяется администратором', approved: 'Зачислено', rejected: 'Отклонено', done: 'Выполнено', refunded: 'Возвращено' };
@@ -19,10 +19,34 @@ function selectPlan() {
     element('planDetails').textContent = plan ? 'Продление на ' + plan.days + ' дн. · ' + money(plan.units, plan.currency) : csrf ? 'Тарифы ещё не настроены. Обратитесь к администратору.' : '';
     element('renew').disabled = busy || !plan;
 }
+function renderHistory(history) {
+    const stamp = JSON.stringify(history);
+    if (stamp === historyStamp) return;
+    const log = element('history');
+    const bottom = historyStamp === undefined || log.scrollTop + log.clientHeight >= log.scrollHeight - 60;
+    historyStamp = stamp; log.replaceChildren();
+    for (const item of history) {
+        const message = document.createElement('div'); message.className = 'message ' + (item.role === 'user' ? 'mine' : 'theirs');
+        const author = document.createElement('strong'); author.textContent = item.role === 'user' ? 'Вы' : 'Поддержка';
+        const text = document.createElement('span'); text.textContent = item.text;
+        message.append(author, text); log.append(message);
+    }
+    if (bottom) log.scrollTop = log.scrollHeight;
+}
+async function pollSupport() {
+    if (!csrf || busy || supportPolling || document.visibilityState !== 'visible') return;
+    const session = csrf; supportPolling = true;
+    try {
+        const data = await api('support'); if (csrf !== session) return;
+        renderHistory(data.history);
+        element('supportState').textContent = data.state === 'open' ? 'Диалог с поддержкой открыт' : 'Задайте вопрос — ответ появится в этой переписке';
+    } catch (error) { if (csrf === session && error.message === 'SESSION_EXPIRED') { signedOut(); element('status').textContent = errors.SESSION_EXPIRED; } }
+    finally { supportPolling = false; }
+}
 function signedOut() {
-    csrf = undefined; plans = [];
+    csrf = undefined; plans = []; historyStamp = undefined;
     element('account').classList.add('hidden'); element('guideSection').classList.add('hidden'); element('login').classList.remove('hidden');
-    for (const id of ['details', 'history', 'payments', 'renewals', 'subscriptionDetails', 'sources', 'guideImages', 'planDetails']) element(id).replaceChildren();
+    for (const id of ['details', 'history', 'payments', 'renewals', 'subscriptionDetails', 'sources', 'guideImages', 'planDetails', 'supportState']) element(id).replaceChildren();
     for (const id of ['question', 'mediaFile', 'amount', 'password']) element(id).value = '';
     element('renewalPlan').replaceChildren();
 }
@@ -47,7 +71,7 @@ async function refresh() {
     selectPlan();
     element('guideSection').classList.remove('hidden');
     element('details').textContent = data.email + '\nRUB: ' + (data.balances.RUB / 100).toFixed(2) + '\nUSDT: ' + (data.balances.USDT / 1000000).toFixed(6);
-    element('history').textContent = data.history.map(item => (item.role === 'user' ? 'Вы: ' : 'Поддержка: ') + item.text).join('\n\n');
+    renderHistory(data.history);
     element('payments').textContent = data.payments.map(item => item.id + ' · ' + money(item.units, item.currency) + ' · ' + (states[item.state] ?? 'Проверяется')).join('\n') || 'Заявок пока нет.';
     element('renewals').textContent = (data.renewals ?? []).map(item => item.id + ' · ' + item.days + ' дн. · ' + money(item.units, item.currency) + ' · ' + (states[item.state] ?? 'Проверяется')).join('\n') || 'Заявок пока нет.';
 }
@@ -71,4 +95,5 @@ element('logout').onclick = () => perform(async () => { await api('logout', {});
 element('erase').onclick = () => perform(async () => { await api('erase-history', {}); await refresh(); });
 element('showGuides').onclick = () => perform(async () => { const values = await api('guides'); element('guideImages').replaceChildren(); if (!values.length) element('guideImages').textContent = 'Проверенные иллюстрации ещё не добавлены.'; for (const value of values) { const figure = document.createElement('figure'); const image = document.createElement('img'); image.src = '/api/guides/' + encodeURIComponent(value.id); image.loading = 'lazy'; image.alt = value.title; const caption = document.createElement('figcaption'); caption.textContent = value.title; figure.append(image, caption); element('guideImages').append(figure); } });
 refresh().catch(() => { signedOut(); });
+setInterval(pollSupport, 5000);
 </script></body></html>

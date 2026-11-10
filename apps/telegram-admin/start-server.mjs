@@ -66,7 +66,8 @@ async function main() {
         adminCreate: extensions.createOptions.enabled,
         extraButtons: [...(userHandler && !config.enhancedUi ? [[{ text: '👤 Найти пользователя', callback_data: 'admin_home' }]] : []), ...(businessHandler ? [[{ text: '💳 Оплаты и продления', callback_data: 'business_home' }]] : [])],
         voiceInput: extensions.voice ? createVoiceInput({ api, allowedUserId: config.allowedUserId, maxSeconds: extensions.voiceSeconds, maxBytes: extensions.voiceBytes }) : undefined,
-        adminHandle: userHandler || businessHandler ? async request => (await userHandler?.(request)) ?? (await businessHandler?.(request)) : undefined,
+        adminHandle: userHandler || businessHandler ? async request => (await businessHandler?.(request)) ?? (await userHandler?.(request)) : undefined,
+        onReplyDelivery: businessHandler?.delivered,
         textModeDescription: classify ? (config.aiEnabled ? `Знакомые вопросы — локально; новые — через подписку Codex, до ${config.dailyLimit} попыток в сутки. Данные обновляются через MCP.` : 'Знакомые вопросы распознаются локально, данные обновляются через MCP. Новые вопросы через ИИ ещё не включены.') : undefined,
         mcpRead: classify ? async (action, days) => {
             if (controller.signal.aborted) throw new Error('STOP_REQUESTED');
