@@ -28,7 +28,8 @@ export function createAdministrationMcp(administration, actorId) {
             } else if (request.params.name === 'prepare_new_user' && Object.keys(args).sort().join(',') === 'days,reference') {
                 const options = administration.creationPolicy(actorId);
                 if (!options.enabled) throw new Error();
-                const ticket = await administration.prepareCreate(actorId, { username: args.reference, days: args.days, trafficLimitBytes: options.trafficLimitBytes, trafficLimitStrategy: options.strategy, hwidDeviceLimit: options.hwidLimit, activeInternalSquads: options.squads });
+                const squads = await administration.creationSquads(actorId);
+                const ticket = await administration.prepareCreate(actorId, { username: args.reference, days: args.days, trafficLimitBytes: options.trafficLimitBytes, trafficLimitStrategy: options.strategy, hwidDeviceLimit: options.hwidLimit, activeInternalSquads: squads.map(squad => squad.uuid) });
                 value = { proposalId: ticket.id, confirmationRequired: true, expiresInSeconds: ticket.expiresInSeconds, panelChanged: false };
             } else throw new Error();
             return { content: [{ type: 'text', text: JSON.stringify(value) }] };

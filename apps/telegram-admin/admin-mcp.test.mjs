@@ -39,6 +39,7 @@ test('calendar and creation MCP tools return only proposals using the configured
     const administration = {
         prepareCalendarRenewal: async (actor, reference, count) => { calls.push({ actor, reference, count }); return { id: 'SyntheticTicket1', expiresInSeconds: 180 }; },
         creationPolicy: () => ({ enabled: true, trafficLimitBytes: 17179869184, strategy: 'MONTH', hwidLimit: 4, squads: ['123e4567-e89b-42d3-a456-426614174000'] }),
+        creationSquads: async () => [{ uuid: '123e4567-e89b-42d3-a456-426614174000', name: 'Example group' }],
         prepareCreate: async (actor, values) => { calls.push({ actor, values }); return { id: 'SyntheticTicket2', expiresInSeconds: 180 }; },
     };
     const server = createAdministrationMcp(administration, 123456789);

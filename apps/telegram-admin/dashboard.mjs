@@ -4,6 +4,7 @@ import { reportActions, validateIntent } from './intent.mjs';
 import { resolveLocalRequest } from './local-router.mjs';
 import { extraView } from './extra-views.mjs';
 import { formatTraffic, formatLimit } from './admin-display.mjs';
+import { forwardedIdentity } from './admin-identity.mjs';
 
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const button = (text, callback_data) => ({ text, callback_data });
@@ -129,8 +130,15 @@ export function createDashboard({ allowedUserId, service, classify, mcpRead, bud
             }
         } else {
             const age = now() / 1000 - message.date;
-            if (!Number.isSafeInteger(message.date) || age > 120 || age < -15 || message.forward_origin || message.forward_from || message.forward_from_chat || typeof message.text !== 'string' || message.text.length > 2000)
+            if (!Number.isSafeInteger(message.date) || age > 120 || age < -15)
                 return null;
+            if (message.forward_origin || message.forward_from || message.forward_from_chat) {
+                const result = await adminHandle?.({ text: '', allowedUserId, telegramForward: true, telegramIdentity: forwardedIdentity(message) });
+                if (!result) return null;
+                context = undefined;
+                return reply(result.text, result.reply_markup);
+            }
+            if (typeof message.text !== 'string' || message.text.length > 2000) return null;
         }
         let failureBack = 'home';
         let failureRows = [];

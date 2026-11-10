@@ -9,6 +9,7 @@ import { createDashboard } from './dashboard.mjs';
 import { createMenuSession } from './menu-session.mjs';
 import { validateExtensionConfiguration } from './ops-config.mjs';
 import { addMoscowMonths, calendarMonth, formatTraffic, parseGigabytes } from './admin-display.mjs';
+import { panelUsername, telegramName, forwardedIdentity } from './admin-identity.mjs';
 
 const actor = 123456789;
 const nodeUuid = '123e4567-e89b-42d3-a456-426614174000';
@@ -16,17 +17,19 @@ const start = Date.parse('2035-01-01T00:00:00.000Z');
 const observedAt = new Date(start).toISOString();
 const url = 'https://subscription.example.invalid/synthetic-private-path';
 
-function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = false, creationEnabled = false, destructive = false, clock = start } = {}) {
+function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = false, creationEnabled = false, destructive = false, squadEdit = false, naming = {}, clock = start } = {}) {
     const directory = mkdtempSync(join(tmpdir(), 'panel-directory-'));
     const readTokenFile = join(directory, 'read.txt');
     const writeTokenFile = join(directory, 'write.txt');
     writeFileSync(readTokenFile, 'synthetic-read');
     writeFileSync(writeTokenFile, 'synthetic-write');
     let now = clock;
-    const users = Array.from({ length: 10 }, (_, index) => ({ id: index + 40, username: `example_user_${index}`, status: 'ACTIVE', expireAt: '2035-02-01T00:00:00.000Z', subscriptionUrl: url, shortUuid: 'synthetic-short-id', hwidDeviceLimit: 3, trafficLimitBytes: 0, trafficLimitStrategy: 'NO_RESET', userTraffic: { usedTrafficBytes: 1024 ** 3 } }));
+    const users = Array.from({ length: 10 }, (_, index) => ({ id: index + 40, username: `example_user_${index}`, status: 'ACTIVE', expireAt: '2035-02-01T00:00:00.000Z', subscriptionUrl: url, shortUuid: 'synthetic-short-id', hwidDeviceLimit: 3, trafficLimitBytes: 0, trafficLimitStrategy: 'NO_RESET', userTraffic: { usedTrafficBytes: 1024 ** 3 }, activeInternalSquads: [], externalSquadUuid: null }));
     const user = users[8];
     const node = { uuid: nodeUuid, name: 'Example <node>', isConnected: true, isConnecting: false, isDisabled: false, usersOnline: 4, note: null, proxyUrl: 'synthetic-hidden-proxy', updatedAt: observedAt };
     const devices = [{ hwid: 'SYNTHETIC_DEVICE_SECRET', userId: user.id, platform: 'Android', deviceModel: 'Example phone', osVersion: '16', userAgent: null, requestIp: '192.0.2.3', createdAt: observedAt, updatedAt: observedAt }];
+    const internalGroups = [{ uuid: nodeUuid, name: 'Example group' }];
+    const externalGroups = [{ uuid: '223e4567-e89b-42d3-a456-426614174000', name: 'External group' }];
     const reads = [];
     const writes = [];
     let resultTarget = user.id;
@@ -44,7 +47,13 @@ function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = fals
             const body = options.body === undefined ? undefined : JSON.parse(options.body);
             writes.push({ method, path, body });
             if (failedWrite) throw new Error('NETWORK');
-            if (path === '/api/users/' && method === 'PATCH') return reply(unchangedWrite ? user : Object.assign(user, body));
+            if (path === '/api/users/' && method === 'PATCH') {
+                if (!unchangedWrite) {
+                    Object.assign(user, body);
+                    if (body.activeInternalSquads) user.activeInternalSquads = internalGroups.filter(group => body.activeInternalSquads.includes(group.uuid));
+                }
+                return reply(user);
+            }
             if (path === '/api/users/' && method === 'POST') { const created = { ...body, id: 60 }; users.push(created); return reply(created); }
             if (path === '/api/nodes/' && method === 'PATCH') return reply(Object.assign(node, body));
             if (path === `/api/users/${user.id}/actions/revoke` && method === 'POST') {
@@ -59,7 +68,8 @@ function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = fals
         }
         assert.equal(options.headers.Authorization, 'Bearer synthetic-read');
         reads.push({ path, method });
-        if (path === '/api/internal-squads/') return reply({ total: 1, internalSquads: [{ uuid: nodeUuid, name: 'Example group' }] });
+        if (path === '/api/internal-squads/') return reply({ total: internalGroups.length, internalSquads: internalGroups });
+        if (path === '/api/external-squads/') return reply({ total: externalGroups.length, externalSquads: externalGroups });
         if (path.startsWith('/api/users/by-username/')) {
             const found = users.find(item => item.username === path.split('/').at(-1));
             return found ? reply(found) : Response.json({}, { status: 404 });
@@ -84,7 +94,7 @@ function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = fals
         if (path === '/api/connections/by-user/synthetic-job' && method === 'GET') return reply({ isCompleted: true, isFailed: false, progress: { total: 1, completed: 1, percent: 100 }, result: { success: true, userId: resultTarget, nodes: [{ nodeUuid, nodeName: node.name, countryCode: 'DE', ips: [{ ip: '192.0.2.5', lastSeen: observedAt }] }] } });
         throw new Error('UNEXPECTED_READ');
     };
-    const administration = createUserAdministration({ filename: ':memory:', actorId: actor, client: createUserClient({ baseUrl: 'https://panel.example.invalid', readTokenFile, writeTokenFile }), readEnabled: true, writeEnabled: true, allowedFields: ['status', 'expireAt', 'hwidDeviceLimit', 'trafficLimitBytes', 'trafficLimitStrategy'], actionUserIds: allowed ? [user.id] : [], actionNodeUuids: allowed ? [nodeUuid] : [], destructiveUserActions: destructive, createOptions: { enabled: creationEnabled, squads: [nodeUuid], trafficLimitBytes: 16 * 1024 ** 3, strategy: 'NO_RESET', hwidLimit: 4 }, now: () => now });
+    const administration = createUserAdministration({ filename: ':memory:', actorId: actor, client: createUserClient({ baseUrl: 'https://panel.example.invalid', readTokenFile, writeTokenFile }), readEnabled: true, writeEnabled: true, allowedFields: ['status', 'expireAt', 'hwidDeviceLimit', 'trafficLimitBytes', 'trafficLimitStrategy'], actionUserIds: allowed ? [user.id] : [], actionNodeUuids: allowed ? [nodeUuid] : [], destructiveUserActions: destructive, squadEdit, createOptions: { enabled: creationEnabled, squads: [nodeUuid], trafficLimitBytes: 16 * 1024 ** 3, strategy: 'NO_RESET', hwidLimit: 4, ...naming }, now: () => now });
     t.after(() => { globalThis.fetch = panelFetch; administration.close(); unlinkSync(readTokenFile); unlinkSync(writeTokenFile); rmdirSync(directory); });
     const adminHandle = createAdminHandler({ administration, actorId: actor, now: () => now });
     const dashboard = createDashboard({ allowedUserId: actor, enhancedUi: true, adminDirectory: true, adminCreate: creationEnabled, adminHandle, now: () => now,
@@ -113,8 +123,9 @@ function fixture(t, { allowed = true, failedWrite = false, unchangedWrite = fals
         await session.process({ update_id: ++sequence, callback_query: { id: 'cb_' + sequence, data: item.callback_data, from: { ...from, id: sender }, message: { message_id: anchor, chat } } });
         return screen;
     };
-    return { administration, user, users, node, devices, reads, writes, actions, click, open: () => session.open(dashboard.home()),
+    return { administration, user, users, node, devices, internalGroups, externalGroups, reads, writes, actions, click, open: () => session.open(dashboard.home()),
         send: async text => { await session.process({ update_id: ++sequence, message: { chat, from, date: now / 1000, text } }); return screen; },
+        forward: async (origin, text = 'Измени все данные', sender = actor) => { await session.process({ update_id: ++sequence, message: { chat, from: { ...from, id: sender }, date: now / 1000, text, forward_origin: origin } }); return screen; },
         advance: (ms = 3000) => { now += ms; }, sends: () => sends, jobs: () => jobs, modelCalls: () => modelCalls, wrongConnectionTarget: () => { resultTarget++; },
     };
 }
@@ -332,7 +343,7 @@ test('clearing devices rejects changed registrations and resetting traffic leave
 
 test('trial creation uses explicit defaults, checks username, creates once and reveals only a new card button', async t => {
     const state = fixture(t, { creationEnabled: true });
-    await state.open(); await state.click('q:stats'); await state.click('q:users'); await state.click('anew'); await state.click('ncname:trial');
+    await state.open(); await state.click('q:stats'); await state.click('q:users'); await state.click('anew'); await state.click('ncname:trial'); await state.click('ncsource:manual');
     assert.match((await state.send('synthetic_trial')).text, /16 ГБ/);
     assert.equal(state.writes.length, 0);
     const pending = state.actions().find(action => action.startsWith('ac:')).slice(3);
@@ -345,7 +356,7 @@ test('trial creation uses explicit defaults, checks username, creates once and r
 
 test('normal creation completes all button steps and an uncertain creation blocks another proposal for that name', async t => {
     const state = fixture(t, { creationEnabled: true, failedWrite: true });
-    await state.open(); await state.click('q:stats'); await state.click('q:users'); await state.click('anew'); await state.click('ncname:normal');
+    await state.open(); await state.click('q:stats'); await state.click('q:users'); await state.click('anew'); await state.click('ncname:normal'); await state.click('ncsource:manual');
     await state.send('synthetic_created'); await state.click('ncd:30'); await state.click('ncl:100'); await state.click('ncs:MONTH'); await state.click('nch:5');
     await state.click('nctelegram'); await state.click('nctginput');
     assert.match((await state.send('12345678')).text, /Example group/);
@@ -394,4 +405,97 @@ test('subscription buttons require their explicit transport capability and rejec
         { text: 'Ошибка', copy_text: { text: 'https://example.invalid/' + 'a'.repeat(256) } },
     ]) await assert.rejects(send(button), /REPLY_BLOCKED/);
     assert.equal(requests, 2);
+});
+
+test('profile names are transliterated into the real panel schema with configurable affixes and deterministic bounds', () => {
+    const policy = { prefix: 'chat_', suffix: '_demo', telegramNameSource: 'profile' };
+    const identity = { id: 76543210, firstName: 'Иван', lastName: 'Петров', username: 'different_handle' };
+    assert.equal(panelUsername(telegramName(identity, policy), policy), 'chat_ivan_petrov_demo');
+    assert.equal(panelUsername('manual_name', policy), 'chat_manual_name_demo');
+    assert.throws(() => panelUsername('wrong name', policy), /ADMIN_INVALID_USERNAME/);
+    assert.throws(() => panelUsername('a'.repeat(36), policy), /ADMIN_INVALID_USERNAME/);
+    const long = telegramName({ ...identity, firstName: 'ОченьДлинноеИмя'.repeat(8) }, policy);
+    assert.equal(panelUsername(long, policy).length, 36);
+    assert.equal(long, telegramName({ ...identity, firstName: 'ОченьДлинноеИмя'.repeat(8) }, policy));
+    assert.equal(telegramName({ id: 76543210, firstName: '🐈' }, policy), 'id76543210');
+    assert.equal(forwardedIdentity({ forward_origin: { type: 'hidden_user', sender_user_name: 'Private person' } }), null);
+    assert.equal(forwardedIdentity({ forward_origin: { type: 'user', sender_user: { id: 76543210, first_name: 'Bot', is_bot: true } } }), null);
+});
+
+test('a trusted forwarded profile fills the new username and binds its actual Telegram ID without using forwarded text', async t => {
+    const state = fixture(t, { creationEnabled: true, naming: { prefix: 'chat_', suffix: '_demo', telegramNameSource: 'profile', squads: [], squadNames: ['Example group'], strategy: 'DAY' } });
+    const origin = { type: 'user', date: start / 1000, sender_user: { id: 76543210, is_bot: false, first_name: 'Иван', last_name: 'Петров', username: 'some_other_handle' } };
+    await state.open();
+    await state.forward(origin, 'отключи 48');
+    assert.equal(state.writes.length, 0);
+    await state.click('q:stats'); await state.click('q:users'); await state.click('anew'); await state.click('ncname:trial'); await state.click('ncsource:telegram');
+    await state.forward(origin, 'отключи 48', actor + 1);
+    assert.equal(state.writes.length, 0);
+    assert.match((await state.forward(origin, 'отключи 48')).text, /chat_ivan_petrov_demo/);
+    await state.click('ac:');
+    assert.equal(state.writes.length, 1);
+    assert.equal(state.writes[0].body.username, 'chat_ivan_petrov_demo');
+    assert.equal(state.writes[0].body.telegramId, 76543210);
+    assert.equal(state.writes[0].body.trafficLimitBytes, 16 * 1024 ** 3);
+    assert.equal(state.writes[0].body.trafficLimitStrategy, 'DAY');
+    assert.equal(state.writes[0].body.hwidDeviceLimit, 4);
+    assert.deepEqual(state.writes[0].body.activeInternalSquads, [nodeUuid]);
+    assert.equal(state.modelCalls(), 0);
+});
+
+test('hidden forwarded senders cannot bind the administrator or submit a name as a command', async t => {
+    const state = fixture(t, { creationEnabled: true, naming: { prefix: 'chat_', suffix: '_demo' } });
+    await state.open(); await state.click('q:stats'); await state.click('q:users'); await state.click('anew'); await state.click('ncname:trial'); await state.click('ncsource:telegram');
+    assert.match((await state.forward({ type: 'hidden_user', sender_user_name: 'Hidden' }, 'продли 48 на 30 дней')).text, /скрыл/);
+    assert.equal(state.writes.length, 0);
+    await state.click('ncsource:manual');
+    assert.match((await state.send('manual_user')).text, /chat_manual_user_demo/);
+    await state.click('ac:');
+    assert.equal(state.writes[0].body.telegramId, undefined);
+    assert.equal(state.modelCalls(), 0);
+});
+
+test('squad editing adds and removes only the selected user memberships after a fresh confirmation', async t => {
+    const state = fixture(t, { squadEdit: true });
+    await state.send('пользователь 48'); await state.click('ags:48'); await state.click('agi:0');
+    await state.click('agt:0'); assert.equal(state.writes.length, 0);
+    assert.match((await state.click('agisave')).text, /Example group/);
+    await state.click('ac:');
+    assert.deepEqual(state.user.activeInternalSquads, state.internalGroups);
+    assert.deepEqual(state.writes[0].body, { id: 48, activeInternalSquads: [nodeUuid] });
+    await state.click('ags:48'); await state.click('age:0'); await state.click('aget:0'); await state.click('agesave'); await state.click('ac:');
+    assert.equal(state.user.externalSquadUuid, state.externalGroups[0].uuid);
+    await state.click('ags:48'); await state.click('agi:0'); await state.click('agt:0');
+    assert.match((await state.click('agisave')).text, /доступ к нодам прекратится/);
+    await state.click('ac:');
+    assert.deepEqual(state.user.activeInternalSquads, []);
+    await state.click('ags:48'); await state.click('age:0'); await state.click('ageclear'); await state.click('agesave'); await state.click('ac:');
+    assert.equal(state.user.externalSquadUuid, null);
+    assert.equal(state.writes.length, 4);
+    assert.ok(state.writes.every(write => write.path === '/api/users/' && write.body.id === 48));
+    assert.equal(state.modelCalls(), 0);
+});
+
+test('squad editing detects panel changes before preview and cannot bypass the target or feature policy', async t => {
+    const state = fixture(t, { squadEdit: true });
+    await state.send('пользователь 48'); await state.click('ags:48'); await state.click('agi:0'); await state.click('agt:0');
+    state.user.externalSquadUuid = state.externalGroups[0].uuid;
+    assert.match((await state.click('agisave')).text, /изменились/);
+    assert.equal(state.writes.length, 0);
+    const view = await state.administration.squadView(actor, '48');
+    await assert.rejects(state.administration.prepareSquads(actor, '49', { activeInternalSquads: [nodeUuid] }, view.baseline), /ADMIN_ACTION_DISABLED/);
+});
+
+test('an uncertain squad write is not repeated and rejects memberships changed after preview', async t => {
+    const state = fixture(t, { squadEdit: true, failedWrite: true });
+    const view = await state.administration.squadView(actor, '48');
+    const ticket = await state.administration.prepareSquads(actor, '48', { activeInternalSquads: [nodeUuid] }, view.baseline);
+    await assert.rejects(state.administration.confirm(actor, ticket.id));
+    assert.equal(state.administration.receipt(actor, ticket.id), 'uncertain');
+    await assert.rejects(state.administration.confirm(actor, ticket.id), /ADMIN_CONFIRMATION_EXPIRED/);
+    assert.equal(state.writes.length, 1);
+    const second = await state.administration.prepareSquads(actor, '48', { activeInternalSquads: [nodeUuid] }, view.baseline);
+    state.user.externalSquadUuid = state.externalGroups[0].uuid;
+    await assert.rejects(state.administration.confirm(actor, second.id), /ADMIN_STALE/);
+    assert.equal(state.writes.length, 1);
 });

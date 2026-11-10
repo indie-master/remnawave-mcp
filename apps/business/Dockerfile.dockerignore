@@ -11,6 +11,8 @@
 !apps/telegram-admin/admin-panel-actions.mjs
 !apps/telegram-admin/admin-display.mjs
 !apps/telegram-admin/admin-create.mjs
+!apps/telegram-admin/admin-identity.mjs
+!apps/telegram-admin/admin-squads.mjs
 !apps/business/
 !apps/business/Dockerfile
 !apps/business/Dockerfile.dockerignore

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { CreateUserCommand, GetInternalSquadsCommand, GetUsersCommand, GetUsersStreamCommand, GetNodesCommand, GetNodeCommand, UpdateNodeCommand, GetUserHwidDevicesCommand, DeleteUserHwidDeviceCommand, DeleteAllUserHwidDevicesCommand, RevokeUserSubscriptionCommand, ResetUserTrafficCommand, ConnectionsByUserCommand, ConnectionsByUserResultCommand } from '@remnawave/backend-contract';
+import { CreateUserCommand, GetInternalSquadsCommand, GetExternalSquadsCommand, GetUsersCommand, GetUsersStreamCommand, GetNodesCommand, GetNodeCommand, UpdateNodeCommand, GetUserHwidDevicesCommand, DeleteUserHwidDeviceCommand, DeleteAllUserHwidDevicesCommand, RevokeUserSubscriptionCommand, ResetUserTrafficCommand, ConnectionsByUserCommand, ConnectionsByUserResultCommand } from '@remnawave/backend-contract';
 import { statusLabels } from './admin-display.mjs';
 
 export const directoryPageSize = 8;
@@ -50,10 +50,18 @@ export function createPanelActions({ read, write }) {
         },
         async squads() {
             const result = await read('GET', GetInternalSquadsCommand.url);
-            if (!count(result?.total) || !Array.isArray(result.internalSquads) || result.total !== result.internalSquads.length) return unavailable();
+            if (!count(result?.total) || !Array.isArray(result.internalSquads) || result.total !== result.internalSquads.length || result.total > 1000 || new Set(result.internalSquads.map(squad => squad?.uuid)).size !== result.total) return unavailable();
             return result.internalSquads.map(squad => {
                 if (!nodeUuidPattern.test(squad?.uuid) || typeof squad.name !== 'string') return unavailable();
-                return { uuid: squad.uuid, name: squad.name.slice(0, 60) };
+                return { uuid: squad.uuid, name: squad.name.slice(0, 64) };
+            });
+        },
+        async externalSquads() {
+            const result = await read('GET', GetExternalSquadsCommand.url);
+            if (!count(result?.total) || !Array.isArray(result.externalSquads) || result.total !== result.externalSquads.length || result.total > 1000 || new Set(result.externalSquads.map(squad => squad?.uuid)).size !== result.total) return unavailable();
+            return result.externalSquads.map(squad => {
+                if (!nodeUuidPattern.test(squad?.uuid) || typeof squad.name !== 'string') return unavailable();
+                return { uuid: squad.uuid, name: squad.name.slice(0, 64) };
             });
         },
         async users(page, { status = 'all', sort = 'id', name } = {}) {

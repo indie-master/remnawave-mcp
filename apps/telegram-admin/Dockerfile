@@ -20,6 +20,7 @@ COPY apps/telegram-admin/extensions.mjs apps/telegram-admin/voice-client.mjs app
 COPY apps/telegram-admin/business-client.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/admin-display.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/admin-create.mjs ./apps/telegram-admin/
+COPY apps/telegram-admin/admin-identity.mjs apps/telegram-admin/admin-squads.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/state-transfer.mjs ./apps/telegram-admin/
 COPY apps/telegram-admin/admin-mcp.mjs apps/telegram-admin/start-admin-mcp.mjs ./apps/telegram-admin/
 COPY apps/business/config.mjs ./apps/business/

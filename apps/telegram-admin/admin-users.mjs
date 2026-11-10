@@ -3,6 +3,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, statSync } from 'node:fs';
 import { CreateUserCommand, GetUserByIdCommand, GetUserByUsernameCommand, UpdateUserCommand } from '@remnawave/backend-contract';
 import { createUserWizard } from './admin-create.mjs';
+import { panelUsername } from './admin-identity.mjs';
+import { createSquadHandler } from './admin-squads.mjs';
 import { RemnawaveClient } from '../../dist/client.js';
 import { createPanelActions, directoryPageSize, nodeChange, nodeUuidPattern, positiveId } from './admin-panel-actions.mjs';
 import { addMoscowMonths, calendarExpiry, calendarMonth, formatLimit, formatTraffic, moscowDate as moscow, parseGigabytes, statusLabels, trafficStrategies } from './admin-display.mjs';
@@ -13,6 +15,7 @@ const reference = value => typeof value === 'string' && (numericId(value) || /^[
 const hash = values => createHash('sha256').update(JSON.stringify(values)).digest('hex');
 function digest(target, operation, changes = {}) {
     if (operation === 'node-edit') return hash([target.uuid, target.name, target.note, target.updatedAt]);
+    if (operation === 'squads') return hash([target.id, (target.activeInternalSquads ?? []).map(squad => squad.uuid).sort(), target.externalSquadUuid ?? null]);
     const fields = Object.hasOwn(changes, 'trafficLimitStrategy') ? editableFields : editableFields.filter(field => field !== 'trafficLimitStrategy');
     const revoke = operation === 'revoke' ? [target.shortUuid, target.subRevokedAt] : [];
     const reset = operation === 'traffic-reset' ? [target.lastTrafficResetAt, target.trafficLimitStrategy] : [];
@@ -43,14 +46,16 @@ export function createUserClient({ baseUrl, readTokenFile, writeTokenFile = '/ru
         async patch(body) {
             const validated = parseUserPatch(body);
             const result = await client(writeTokenFile).request('PATCH', UpdateUserCommand.url, undefined, validated);
-            const confirmed = result?.id === body.id && Object.entries(validated).every(([field, value]) => result[field] === (value instanceof Date ? value.toISOString() : value));
+            const confirmed = result?.id === body.id && Object.entries(validated).every(([field, value]) => field === 'activeInternalSquads'
+                ? Array.isArray(result[field]) && hash(result[field].map(squad => squad.uuid).sort()) === hash([...value].sort())
+                : result[field] === (value instanceof Date ? value.toISOString() : value));
             if (!confirmed) throw new Error('ADMIN_RESULT_UNCERTAIN');
             return result;
         },
     };
 }
 
-export function createUserAdministration({ filename, client, actorId, readEnabled = false, writeEnabled = false, allowedFields = ['status', 'expireAt', 'description'], actionUserIds = [], actionNodeUuids = [], destructiveUserActions = false, createOptions = { enabled: false }, nodesEnabled = true, now = Date.now }) {
+export function createUserAdministration({ filename, client, actorId, readEnabled = false, writeEnabled = false, allowedFields = ['status', 'expireAt', 'description'], actionUserIds = [], actionNodeUuids = [], destructiveUserActions = false, squadEdit = false, createOptions = { enabled: false }, nodesEnabled = true, now = Date.now }) {
     if (!Number.isSafeInteger(actorId) || actorId <= 0 || !Array.isArray(allowedFields) || !allowedFields.length || new Set(allowedFields).size !== allowedFields.length || allowedFields.some(field => !editableFields.includes(field)) || (writeEnabled && !readEnabled)) throw new Error('ADMIN_CONFIGURATION_INVALID');
     const database = new DatabaseSync(filename);
     database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=2000; CREATE TABLE IF NOT EXISTS confirmations (id TEXT PRIMARY KEY, actor INTEGER NOT NULL, target TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, baseline TEXT NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL); CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, action TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL);');
@@ -81,13 +86,16 @@ export function createUserAdministration({ filename, client, actorId, readEnable
     }
     const canUserAction = id => writeEnabled && actionUserIds.includes(Number(id));
     const canDestructiveAction = id => destructiveUserActions && canUserAction(id);
+    const canSquadEdit = id => squadEdit && canUserAction(id);
     const canNodeEdit = uuid => nodesEnabled && writeEnabled && actionNodeUuids.includes(uuid);
     function checkNodes() { if (!nodesEnabled) throw new Error('REPORT_DISABLED'); }
     async function creationSquads() {
         if (!writeEnabled || !createOptions.enabled) throw new Error('ADMIN_CREATE_DISABLED');
         const squads = await client.squads();
-        const permitted = squads.filter(squad => createOptions.squads.includes(squad.uuid));
-        if (!permitted.length || permitted.length !== createOptions.squads.length) throw new Error('ADMIN_CREATE_DISABLED');
+        const names = createOptions.squadNames ?? [];
+        if (names.some(name => squads.filter(squad => squad.name === name).length !== 1)) throw new Error('ADMIN_CREATE_DISABLED');
+        const permitted = squads.filter(squad => createOptions.squads.includes(squad.uuid) || names.includes(squad.name));
+        if (!permitted.length || permitted.length !== createOptions.squads.length + names.length) throw new Error('ADMIN_CREATE_DISABLED');
         return permitted;
     }
     async function assertNewUsername(username) {
@@ -97,7 +105,7 @@ export function createUserAdministration({ filename, client, actorId, readEnable
         throw new Error('ADMIN_USERNAME_EXISTS');
     }
     return {
-        canUserAction, canNodeEdit, canDestructiveAction,
+        canUserAction, canNodeEdit, canDestructiveAction, canSquadEdit,
         creationPolicy(actor) { authorize(actor); return { ...createOptions, enabled: writeEnabled && createOptions.enabled }; },
         async creationSquads(actor) { authorize(actor); return exclusive(creationSquads, 'creation'); },
         async prepareCreate(actor, values) {
@@ -105,17 +113,50 @@ export function createUserAdministration({ filename, client, actorId, readEnable
             if (!writeEnabled || !createOptions.enabled) throw new Error('ADMIN_CREATE_DISABLED');
             if (!values || Object.keys(values).some(field => !['username', 'days', 'trafficLimitBytes', 'trafficLimitStrategy', 'hwidDeviceLimit', 'activeInternalSquads', 'telegramId'].includes(field))) throw new Error('ADMIN_INVALID_CHANGE');
             if (!Number.isSafeInteger(values.trafficLimitBytes) || values.trafficLimitBytes < 0 || !Number.isInteger(values.hwidDeviceLimit) || values.hwidDeviceLimit < 1 || values.hwidDeviceLimit > 100 || !Object.hasOwn(trafficStrategies, values.trafficLimitStrategy)) throw new Error('ADMIN_INVALID_CHANGE');
-            if (!Number.isInteger(values.days) || values.days < 1 || values.days > 366 || !Array.isArray(values.activeInternalSquads) || !values.activeInternalSquads.length || new Set(values.activeInternalSquads).size !== values.activeInternalSquads.length || values.activeInternalSquads.some(uuid => !createOptions.squads.includes(uuid))) throw new Error('ADMIN_INVALID_CHANGE');
+            if (!Number.isInteger(values.days) || values.days < 1 || values.days > 366 || !Array.isArray(values.activeInternalSquads) || !values.activeInternalSquads.length || new Set(values.activeInternalSquads).size !== values.activeInternalSquads.length) throw new Error('ADMIN_INVALID_CHANGE');
             return exclusive(async () => {
-                const body = { ...values, status: 'ACTIVE', expireAt: new Date(now() + values.days * 86400000).toISOString() };
+                const body = { ...values, username: panelUsername(values.username, createOptions), status: 'ACTIVE', expireAt: new Date(now() + values.days * 86400000).toISOString() };
                 delete body.days;
                 const result = CreateUserCommand.RequestBodySchema.safeParse(body);
                 if (!result.success || JSON.stringify(body).length > 2048) throw new Error('ADMIN_INVALID_CHANGE');
                 const squads = await creationSquads();
+                if (body.activeInternalSquads.some(uuid => !squads.some(squad => squad.uuid === uuid))) throw new Error('ADMIN_CREATE_DISABLED');
                 await assertNewUsername(body.username);
                 const ticketValue = ticket({ id: body.username }, 'create', body);
                 return { ...ticketValue, squadNames: squads.filter(squad => body.activeInternalSquads.includes(squad.uuid)).map(squad => squad.name) };
             }, 'creation');
+        },
+        async squadView(actor, id) {
+            authorize(actor);
+            return exclusive(async () => {
+                const user = await get(id);
+                const [internal, external] = await Promise.all([client.squads(), client.externalSquads()]);
+                if (internal.length > 1000 || external.length > 1000 || !Array.isArray(user.activeInternalSquads) || user.activeInternalSquads.some(squad => !nodeUuidPattern.test(squad.uuid)) || (user.externalSquadUuid !== null && user.externalSquadUuid !== undefined && !nodeUuidPattern.test(user.externalSquadUuid))) throw new Error('ADMIN_UNAVAILABLE');
+                return { id: user.id, username: user.username, internal, external, selected: user.activeInternalSquads.map(squad => squad.uuid), externalUuid: user.externalSquadUuid ?? null, baseline: digest(user, 'squads') };
+            }, 'squads');
+        },
+        async prepareSquads(actor, id, changes, baseline) {
+            authorize(actor);
+            if (!canSquadEdit(id)) throw new Error('ADMIN_ACTION_DISABLED');
+            if (!changes || Object.keys(changes).length !== 1 || !['activeInternalSquads', 'externalSquadUuid'].includes(Object.keys(changes)[0])) throw new Error('ADMIN_INVALID_CHANGE');
+            return exclusive(async () => {
+                const user = await get(id);
+                if (digest(user, 'squads') !== baseline) throw new Error('ADMIN_STALE');
+                const body = parseUserPatch({ id: user.id, ...changes });
+                let names;
+                if (body.activeInternalSquads !== undefined) {
+                    const squads = await client.squads();
+                    if (new Set(body.activeInternalSquads).size !== body.activeInternalSquads.length || body.activeInternalSquads.some(uuid => !squads.some(squad => squad.uuid === uuid))) throw new Error('ADMIN_INVALID_CHANGE');
+                    if (hash([...body.activeInternalSquads].sort()) === hash(user.activeInternalSquads.map(squad => squad.uuid).sort())) throw new Error('ADMIN_NO_CHANGE');
+                    names = squads.filter(squad => body.activeInternalSquads.includes(squad.uuid)).map(squad => squad.name);
+                } else {
+                    const squads = await client.externalSquads();
+                    if (body.externalSquadUuid !== null && !squads.some(squad => squad.uuid === body.externalSquadUuid)) throw new Error('ADMIN_INVALID_CHANGE');
+                    if (body.externalSquadUuid === (user.externalSquadUuid ?? null)) throw new Error('ADMIN_NO_CHANGE');
+                    names = squads.filter(squad => squad.uuid === body.externalSquadUuid).map(squad => squad.name);
+                }
+                return { ...ticket(user, 'squads', changes), squadNames: names };
+            }, 'squads');
         },
         policy(actor) { authorize(actor); return { writeEnabled, fields: [...allowedFields] }; },
         hasInFlight(actor) { authorize(actor); return busy; },
@@ -256,6 +297,7 @@ export function createUserAdministration({ filename, client, actorId, readEnable
             const entry = database.prepare('SELECT * FROM confirmations WHERE id = ? AND actor = ? AND state = ? AND expires >= ?').get(id, actor, 'pending', now());
             if (!entry) throw new Error('ADMIN_CONFIRMATION_EXPIRED');
             if (entry.operation === 'patch' && !writeEnabled) throw new Error('ADMIN_WRITE_DISABLED');
+            if (entry.operation === 'squads' && !canSquadEdit(entry.target)) throw new Error('ADMIN_ACTION_DISABLED');
             if (entry.operation === 'create' && (!writeEnabled || !createOptions.enabled)) throw new Error('ADMIN_CREATE_DISABLED');
             if ((['revoke', 'device-delete'].includes(entry.operation) && !canUserAction(entry.target)) || (entry.operation === 'node-edit' && !canNodeEdit(entry.target))) throw new Error('ADMIN_ACTION_DISABLED');
             if (['traffic-reset', 'devices-clear'].includes(entry.operation) && !canDestructiveAction(entry.target)) throw new Error('ADMIN_ACTION_DISABLED');
@@ -269,7 +311,10 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                 if (entry.operation === 'create') {
                     const changes = JSON.parse(entry.payload);
                     const parsed = CreateUserCommand.RequestBodySchema.safeParse(changes);
-                    if (!parsed.success || changes.username !== entry.target) throw new Error('ADMIN_INVALID_CHANGE');
+                    const prefix = createOptions.prefix ?? '';
+                    const suffix = createOptions.suffix ?? '';
+                    const base = changes.username.slice(prefix.length, suffix ? -suffix.length : undefined);
+                    if (!parsed.success || changes.username !== entry.target || panelUsername(base, createOptions) !== changes.username) throw new Error('ADMIN_INVALID_CHANGE');
                     const squads = await creationSquads();
                     if (!changes.activeInternalSquads?.length || changes.activeInternalSquads.some(uuid => !squads.some(squad => squad.uuid === uuid))) throw new Error('ADMIN_CREATE_DISABLED');
                     try { await client.get(changes.username); throw new Error('ADMIN_USERNAME_EXISTS'); }
@@ -302,6 +347,17 @@ export function createUserAdministration({ filename, client, actorId, readEnable
                     nodeChange(entry.target, changes.field, changes.value);
                     state = 'uncertain';
                     await client.updateNode(entry.target, changes.field, changes.value);
+                    state = 'done'; return { changed: true };
+                }
+                if (entry.operation === 'squads') {
+                    const field = Object.keys(changes)[0];
+                    if (Object.keys(changes).length !== 1 || !['activeInternalSquads', 'externalSquadUuid'].includes(field)) throw new Error('ADMIN_INVALID_CHANGE');
+                    const catalog = field === 'activeInternalSquads' ? await client.squads() : await client.externalSquads();
+                    const selected = field === 'activeInternalSquads' ? changes[field] : changes[field] === null ? [] : [changes[field]];
+                    if (!Array.isArray(selected) || selected.some(uuid => !catalog.some(squad => squad.uuid === uuid))) throw new Error('ADMIN_STALE');
+                    parseUserPatch({ id: user.id, ...changes });
+                    state = 'uncertain';
+                    await client.patch({ id: user.id, ...changes });
                     state = 'done'; return { changed: true };
                 }
                 if (entry.operation === 'devices-clear') {
@@ -359,7 +415,14 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
             'devices-clear': () => `Удалить все зарегистрированные устройства пользователя. Сейчас их ${ticket.changes.count}.`,
             'traffic-reset': () => `Сбросить текущий счётчик трафика (${formatTraffic(ticket.changes.usedBytes)}). Лимит и стратегия сохранятся.`,
             'node-edit': () => `${escape(ticket.changes.name)} · ${ticket.changes.field === 'name' ? 'Новое название' : 'Новая заметка'}: <code>${escape(ticket.changes.value ?? 'очистить')}</code>`,
-            create: () => `Создать пользователя <b>${escape(ticket.changes.username)}</b>\nДо: ${moscow(ticket.changes.expireAt)} МСК\nТрафик: ${formatLimit(ticket.changes.trafficLimitBytes)}\nСброс: ${trafficStrategies[ticket.changes.trafficLimitStrategy]}\nУстройства: ${ticket.changes.hwidDeviceLimit}\nГруппы: ${ticket.squadNames ? ticket.squadNames.map(escape).join(', ') : `${ticket.changes.activeInternalSquads.length} разрешённых групп`}\nTelegram: ${ticket.changes.telegramId ?? 'не указан'}`,
+            squads: () => {
+                const names = ticket.squadNames ?? [];
+                const internal = ticket.changes.activeInternalSquads !== undefined;
+                const count = internal ? ticket.changes.activeInternalSquads.length : ticket.changes.externalSquadUuid === null ? 0 : 1;
+                const list = names.slice(0, 10).map(name => escape(name.slice(0, 40))).join(', ');
+                return `${internal ? 'Внутренние сквады' : 'Внешний сквад'} после изменения: ${count}${list ? `\n${list}` : ''}${count > 10 ? `\nПоказаны первые 10 из ${count} назначений.` : ''}${internal && count === 0 ? '\nВсе внутренние назначения будут сняты, доступ к нодам прекратится.' : ''}`;
+            },
+            create: () => `Создать пользователя <b>${escape(ticket.changes.username)}</b>\nДо: ${moscow(ticket.changes.expireAt)} МСК\nТрафик: ${formatLimit(ticket.changes.trafficLimitBytes)}\nСброс: ${trafficStrategies[ticket.changes.trafficLimitStrategy]}\nУстройства: ${ticket.changes.hwidDeviceLimit}\nГруппы: ${ticket.squadNames ? ticket.squadNames.map(name => escape(name.slice(0, 40))).join(', ') : `${ticket.changes.activeInternalSquads.length} разрешённых групп`}\nTelegram: ${ticket.changes.telegramId ?? 'не указан'}`,
             patch: () => {
                 if (ticket.changes.expireAt && Object.keys(ticket.changes).length === 1) return `${ticket.previousExpireAt ? `Текущий срок: ${moscow(ticket.previousExpireAt)} МСК\n` : ''}Новый срок: <b>${moscow(ticket.changes.expireAt)} МСК</b>\n<code>${escape(ticket.changes.expireAt)}</code>`;
                 return Object.entries(ticket.changes).map(([field, value]) => `${labels[field]}: <b>${escape(field === 'trafficLimitBytes' ? formatLimit(value) : field === 'trafficLimitStrategy' ? trafficStrategies[value] : field === 'status' ? statusLabels[value] : value)}</b>`).join('\n');
@@ -387,6 +450,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
         const parent = Number.isInteger(cardOrigin.page) ? `aul:${cardOrigin.page}` : cardOrigin.page === 'telegram' ? 'atse' : 'q:users';
         const permissions = policy();
         const rows = [[button('🔗 Подписка', `as:${user.id}`), button('📊 Трафик и лимиты', `atr:${user.id}`)], [button('📱 Устройства', `ah:${user.id}:0`), button('🔌 Соединения', `aj:${user.id}:start`)]];
+        rows.push([button('🔐 Сквады доступа', `ags:${user.id}`)]);
         if (permissions.writeEnabled && permissions.fields.includes('expireAt')) rows.push([{ text: '⏳ Продлить', callback_data: `ar:${user.id}` }]);
         if (permissions.writeEnabled && permissions.fields.length) rows.push([{ text: '✏️ Изменить данные', callback_data: `av:${user.id}` }]);
         if (permissions.writeEnabled && permissions.fields.includes('status')) rows.push([user.status === 'DISABLED' ? button('Включить', `ae:${user.id}`) : button('Отключить', `ad:${user.id}`)]);
@@ -405,12 +469,16 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
         return localTime + '+03:00';
     }
     const creation = createUserWizard({ administration, actorId, proposal, now });
-    const handle = async ({ text = '', data, allowedUserId }) => {
+    const squads = createSquadHandler({ administration, actorId, proposal, now });
+    const handle = async ({ text = '', data, allowedUserId, telegramForward = false, telegramIdentity }) => {
         if (allowedUserId !== actorId) return null;
+        if (telegramForward) return creation({ telegramForward, telegramIdentity });
         const priorInput = input;
         if (data || text.startsWith('/') || /^(?:плат[её]ж|ответ|сверка)\s+[a-f0-9]{24}(?:\s|$)/i.test(text)) { input = undefined; userSection = false; }
         const creationResult = await creation({ text, data });
         if (creationResult) { input = undefined; userSection = true; return creationResult; }
+        const squadsResult = await squads({ data });
+        if (squadsResult) { input = undefined; userSection = true; return squadsResult; }
         const match = text.match(/^(?:(?:покажи|открой|найди)\s+)?(?:пользователь|пользователя|юзер|юзера|user)\s+(?:(?:с\s+)?id\s+|#)?([A-Za-z0-9_-]{1,36})$/i);
         const edit = text.match(/^(?:измени|изменить)\s+([A-Za-z0-9_-]{1,36})\s+([A-Za-z]+)=(.{1,500})$/i);
         const subscription = text.match(/^(?:подписка|ссылка подписки)\s+([A-Za-z0-9_-]{1,36})$/i);
@@ -432,7 +500,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
             if (data === 'admin_cancel_input') return response('Ввод отменён. Панель не изменялась.', navigation);
             if (data === 'admin_operations') {
                 const entries = administration.operations?.(actorId) ?? [];
-                const operations = { create: 'Создание пользователя', patch: 'Изменение данных', subscription: 'Выдача ссылки', revoke: 'Отзыв подписки', 'device-delete': 'Удаление устройства', 'devices-clear': 'Очистка устройств', 'traffic-reset': 'Сброс трафика', 'node-edit': 'Изменение ноды' };
+                const operations = { create: 'Создание пользователя', patch: 'Изменение данных', subscription: 'Выдача ссылки', revoke: 'Отзыв подписки', squads: 'Сквады доступа', 'device-delete': 'Удаление устройства', 'devices-clear': 'Очистка устройств', 'traffic-reset': 'Сброс трафика', 'node-edit': 'Изменение ноды' };
                 const states = { pending: 'Ожидает подтверждения', executing: 'Выполняется', uncertain: 'Результат требует сверки', done: 'Выполнено', rejected: 'Отклонено', cancelled: 'Отменено', expired: 'Истекло' };
                 return response('<b>Последние сохранённые операции</b>\n' + (entries.length ? entries.map(entry => `#${escape(entry.target)} · ${operations[entry.operation] ?? 'Операция'}\n${states[entry.state] ?? 'Сверьте результат'}\n<code>${escape(entry.id)}</code>`).join('\n\n') : 'Операций пока нет.') + '\n\nВыполняющиеся операции и неясные результаты сначала сверьте с панелью.', navigation);
             }
@@ -679,7 +747,7 @@ export function createAdminHandler({ administration, actorId, renewalDays = [1, 
                 failureBack = ticketParent(ticket);
                 const result = await administration.confirm(actorId, data.slice(3));
                 if (result.createdId) return response(`✅ Создан пользователь #${result.createdId}.`, [[button('Открыть карточку', `au:${result.createdId}`)], back('anew'), home]);
-                const parent = ticket.operation === 'subscription' || ticket.operation === 'revoke' ? `as:${ticket.target}` : ['device-delete', 'devices-clear'].includes(ticket.operation) ? `ah:${ticket.target}:${devicePage?.target === ticket.target ? devicePage.page : 0}` : ticket.operation === 'traffic-reset' ? `atr:${ticket.target}` : failureBack;
+                const parent = ticket.operation === 'subscription' || ticket.operation === 'revoke' ? `as:${ticket.target}` : ['device-delete', 'devices-clear'].includes(ticket.operation) ? `ah:${ticket.target}:${devicePage?.target === ticket.target ? devicePage.page : 0}` : ticket.operation === 'traffic-reset' ? `atr:${ticket.target}` : ticket.operation === 'squads' ? `ags:${ticket.target}` : failureBack;
                 if (result.subscriptionUrl) {
                     const link = result.subscriptionUrl;
                     const links = [{ text: '🌐 Открыть подписку', url: link }, ...(link.length <= 256 ? [{ text: '📋 Скопировать ссылку', copy_text: { text: link } }] : [])];
