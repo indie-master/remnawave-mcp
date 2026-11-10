@@ -61,11 +61,11 @@ export function createSupportInbox({ actorId, call, now = Date.now }) {
             let selected = composing;
             const cancel = (composing && (text === '/cancel' || text?.toLowerCase() === 'отмена')) || data === 'bsx';
             if (data && !action && !opening) composing = undefined;
-            if (!telegramReply && ['/start', '/menu', '/help', '/budget', '/payments', '/cancel'].includes(text)) composing = undefined;
+            if (!telegramReply && text?.startsWith('/')) composing = undefined;
             try {
                 if (leaving || cancel) {
                     const id = leaving?.[1] ?? selected?.id; composing = undefined;
-                    if (id) return await loadCard(id, '⏸ Вы вышли из переписки. Само обращение остаётся открытым.', false);
+                    if (id) return screen('⏸ Вы вышли из переписки. Само обращение остаётся открытым.', [[{ text: '✍️ Продолжить переписку', callback_data: `bh:${id}` }]], id);
                     return screen('Ввод ответа отменён.');
                 }
                 if (opening) return await loadCard(opening[1], '', true, selected?.id === opening[1] ? selected.panelId : undefined);

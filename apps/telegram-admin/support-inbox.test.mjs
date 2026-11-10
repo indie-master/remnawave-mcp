@@ -185,8 +185,8 @@ test('leaving, resuming, switching customers and renewing the idle timer preserv
         await state.write('До выхода');
         await state.click(firstCard, 'bsl:' + state.tickets[0]);
         assert.equal(state.store.openSupport(state.first), state.tickets[0]);
-        assert.ok(state.delivered.get(firstCard).reply_markup.inline_keyboard.flat().some(button => button.callback_data?.includes(':bsr:')));
-        await state.click(firstCard, 'answer'); await state.write('После возврата');
+        assert.ok(state.delivered.get(firstCard).reply_markup.inline_keyboard.flat().some(button => button.text === '✍️ Продолжить переписку'));
+        await state.click(firstCard, 'bh:' + state.tickets[0]); await state.write('После возврата');
         state.advance(20 * 60000); await state.write('Продолжаем через двадцать минут');
         state.advance(20 * 60000); await state.write('Таймер обновлён предыдущим ответом');
         assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Таймер обновлён предыдущим ответом');
@@ -247,5 +247,18 @@ test('a mismatched thread response cannot silently select another customer for c
         await state.click(card, 'bh:' + state.tickets[0]); await state.write('Восстановили первого');
         assert.equal(state.store.supportHistory(state.first).at(-1).text, 'Восстановили первого');
         assert.equal(state.store.supportHistory(state.second).length, 1); assert.equal(state.modelCalls(), 0);
+    } finally { state.store.close(); }
+});
+
+test('leaving a conversation is local and does not get stuck when the support backend cannot read', async () => {
+    const state = await fixture();
+    try {
+        const card = await state.open(0); state.failRead(); const reads = state.requests.length;
+        await state.click(card, 'bsl:' + state.tickets[0]);
+        assert.equal(state.requests.length, reads);
+        assert.match(state.delivered.get(card).text, /вышли из переписки/);
+        assert.equal(state.store.openSupport(state.first), state.tickets[0]);
+        assert.equal(await state.admin({ allowedUserId: actor, updateId: 9999, text: 'Обычный текст после выхода' }), null);
+        assert.equal(state.store.supportHistory(state.first).length, 1);
     } finally { state.store.close(); }
 });
