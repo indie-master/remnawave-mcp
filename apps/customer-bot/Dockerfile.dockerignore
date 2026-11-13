@@ -1,0 +1,15 @@
+**
+!LICENSE
+!apps/
+!apps/customer-bot/
+!apps/customer-bot/config.mjs
+!apps/customer-bot/gateway-client.mjs
+!apps/customer-bot/handler.mjs
+!apps/customer-bot/receiver.mjs
+!apps/customer-bot/start.mjs
+!apps/telegram-client/
+!apps/telegram-client/telegram-api.mjs
+!apps/telegram-admin/
+!apps/telegram-admin/run-safety.mjs
+!apps/telegram-admin/healthcheck.mjs
+!apps/telegram-admin/state-control.mjs

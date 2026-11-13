@@ -1,0 +1,9 @@
+FROM python:3.12-slim-bookworm
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+RUN pip install --no-cache-dir faster-whisper==1.2.1 av==17.1.0
+RUN HF_HUB_OFFLINE=0 python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-tiny', revision='d90ca5fe260221311c53c58e660288d3deb8d356', local_dir='/model', allow_patterns=['config.json','model.bin','tokenizer.json','vocabulary.txt'])"
+RUN useradd --uid 1000 --create-home worker && mkdir /voice && chown worker:worker /voice
+COPY apps/telegram-admin/voice-worker.py /app/voice-worker.py
+RUN chmod 0755 /app && chmod 0444 /app/voice-worker.py
+USER worker
+CMD ["python", "/app/voice-worker.py"]

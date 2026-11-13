@@ -1,0 +1,60 @@
+name: panel-admin-bot
+services:
+  bot:
+    env_file:
+      - path: ./.env.extensions
+        required: false
+    image: panel-admin-bot:local
+    build:
+      context: ../..
+      dockerfile: apps/telegram-admin/Dockerfile
+    command: ["--live", "--confirm-sole-receiver", "--seconds", "900"]
+    restart: "no"
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.50
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    stop_grace_period: 45s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      REMNAWAVE_BASE_URL: ${REMNAWAVE_BASE_URL:?Set the private panel HTTPS origin}
+      BOT_USERNAME: ${BOT_USERNAME:?Set the intended bot username without @}
+      TELEGRAM_ADMIN_ID: ${TELEGRAM_ADMIN_ID:?Set the sole administrator numeric ID}
+      PANEL_USERS_READ_ENABLED: ${PANEL_USERS_READ_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
+      REMNAWAVE_API_TOKEN_FILE: /run/secrets/panel_api_token
+      BOT_STATE_DIRECTORY: /state
+      AI_ENABLED: "false"
+    secrets:
+      - telegram_bot_token
+      - panel_api_token
+    volumes:
+      - bot-state:/state
+      - voice-bridge:/voice:ro
+      - business-bridge:/business-bridge:ro
+    healthcheck:
+      test: ["CMD", "node", "/app/apps/telegram-admin/healthcheck.mjs"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"
+secrets:
+  telegram_bot_token:
+    file: ./secrets/telegram-bot-token.txt
+  panel_api_token:
+    file: ./secrets/panel-api-token.txt
+volumes:
+  bot-state:
+  voice-bridge:
+  business-bridge:

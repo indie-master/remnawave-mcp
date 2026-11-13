@@ -1,0 +1,6 @@
+**
+!apps/
+!apps/business/
+!apps/business/media-worker.py
+!apps/business/Dockerfile.media
+!apps/business/Dockerfile.media.dockerignore

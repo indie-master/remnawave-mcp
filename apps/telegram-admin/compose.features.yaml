@@ -1,0 +1,4 @@
+services:
+  bot:
+    environment:
+      BOT_ENHANCED_UI: "true"

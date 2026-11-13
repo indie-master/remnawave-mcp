@@ -1,0 +1,8 @@
+services:
+  portal:
+    volumes:
+      - ai-bridge:/bridge:ro
+volumes:
+  ai-bridge:
+    external: true
+    name: panel-admin-bot_ai-bridge
