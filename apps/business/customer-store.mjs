@@ -4,8 +4,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const telegramId = value => Number.isSafeInteger(value) && value > 0;
 const token = () => randomBytes(24).toString('base64url');
 
-export function createCustomerStore({ database, transact, api, enabled = false, now = Date.now }) {
-    if (typeof enabled !== 'boolean') throw new Error('INVALID_CUSTOMER_CONFIGURATION');
+export function createCustomerStore({ database, transact, api, enabled = false, signupEnabled = true, now = Date.now }) {
+    if (typeof enabled !== 'boolean' || typeof signupEnabled !== 'boolean') throw new Error('INVALID_CUSTOMER_CONFIGURATION');
     database.exec(`
         CREATE TABLE IF NOT EXISTS telegram_users (telegram_id INTEGER PRIMARY KEY,account TEXT NOT NULL UNIQUE,nonce TEXT NOT NULL,created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS telegram_codes (digest TEXT PRIMARY KEY,account TEXT NOT NULL UNIQUE,expires INTEGER NOT NULL);
@@ -22,8 +22,54 @@ export function createCustomerStore({ database, transact, api, enabled = false, 
             database.prepare('UPDATE attempts SET count=count+1 WHERE key=?').run(key);
         } else database.prepare('INSERT OR REPLACE INTO attempts VALUES (?,1,?)').run(key, now() + window);
     };
+    const ensure = profile => {
+        guard();
+        if (!profile || !telegramId(profile.telegramId) || typeof profile.firstName !== 'string' || profile.firstName.length > 256 || typeof profile.lastName !== 'string' || profile.lastName.length > 256) throw new Error('CUSTOMER_REQUEST_REJECTED');
+        const previous = database.prepare('SELECT * FROM telegram_users WHERE telegram_id=?').get(profile.telegramId);
+        if (previous) return previous;
+        if (!signupEnabled) throw new Error('CUSTOMER_NOT_LINKED');
+        limit('signup', 20);
+        const account = api.createTelegramAccount(profile); const nonce = token();
+        database.prepare('INSERT INTO telegram_users VALUES (?,?,?,?)').run(profile.telegramId, account, nonce, now());
+        return { telegram_id: profile.telegramId, account, nonce };
+    };
+    const move = (source, target) => {
+        const current = database.prepare('SELECT * FROM telegram_users WHERE account=?').get(source);
+        if (!current || database.prepare('SELECT 1 FROM telegram_users WHERE account=?').get(target)) throw new Error('CUSTOMER_LINK_REJECTED');
+        api.mergeTelegramAccount(source, target);
+        database.prepare("UPDATE telegram_outbox SET state='cancelled' WHERE account=? AND state='pending'").run(source);
+        database.prepare('DELETE FROM telegram_codes WHERE account=? OR account=?').run(source, target);
+        database.prepare('UPDATE telegram_users SET account=?,nonce=? WHERE telegram_id=?').run(target, token(), current.telegram_id);
+        return { linked: true };
+    };
     return {
         enabled,
+        ensure(profile) { return transact(() => { ensure(profile); return { ready: true }; }); },
+        moveToAccount: move,
+        registerBot(username, id) {
+            guard(); if (!/^(?=.{5,32}$)[A-Za-z0-9_]+bot$/i.test(username) || !telegramId(id)) throw new Error('CUSTOMER_REQUEST_REJECTED');
+            database.prepare('INSERT OR REPLACE INTO telegram_bot_identity VALUES (?,?)').run(username.toLowerCase(), id); return { registered: true };
+        },
+        botIdentity(username) { guard(); return database.prepare('SELECT bot_id FROM telegram_bot_identity WHERE username=?').get(username.toLowerCase())?.bot_id; },
+        webLogin({ profile, digest, authDate }, previousToken) {
+            guard(); if (!/^[a-f0-9]{64}$/.test(digest ?? '') || !Number.isSafeInteger(authDate) || authDate < now() - 300000 || authDate > now() + 15000) throw new Error('TELEGRAM_LOGIN_REJECTED');
+            return transact(() => {
+                if (previousToken) {
+                    let previous;
+                    try { previous = api.session(previousToken); } catch {}
+                    const row = database.prepare('SELECT account FROM telegram_users WHERE telegram_id=?').get(profile.telegramId);
+                    if (previous && previous.account === row?.account) {
+                        database.prepare('INSERT OR IGNORE INTO telegram_launches VALUES (?,?)').run(digest, authDate + 315000);
+                        return { token: previousToken, csrf: previous.csrf, accountId: row.account };
+                    }
+                }
+                database.prepare('DELETE FROM telegram_launches WHERE expires<?').run(now());
+                if (database.prepare('SELECT 1 FROM telegram_launches WHERE digest=?').get(digest)) throw new Error('TELEGRAM_LOGIN_REJECTED');
+                const row = ensure(profile); limit('web:' + profile.telegramId, 10);
+                database.prepare('INSERT INTO telegram_launches VALUES (?,?)').run(digest, authDate + 315000);
+                return api.createTelegramSession(row);
+            });
+        },
         state(account) { api.account(account); return { enabled, linked: !!database.prepare('SELECT 1 FROM telegram_users WHERE account=?').get(account) }; },
         issue(account) {
             guard(); api.account(account);
@@ -41,14 +87,16 @@ export function createCustomerStore({ database, transact, api, enabled = false, 
             transact(() => limit('attempt:' + id, 5));
             return transact(() => {
                 const row = database.prepare('SELECT account FROM telegram_codes WHERE digest=? AND expires>? AND expires<=?').get(hash(code), now(), now() + 300000);
-                if (!row || database.prepare('SELECT 1 FROM telegram_users WHERE telegram_id=? OR account=?').get(id, row.account)) throw new Error('CUSTOMER_LINK_REJECTED');
+                if (!row || database.prepare('SELECT 1 FROM telegram_users WHERE account=?').get(row.account)) throw new Error('CUSTOMER_LINK_REJECTED');
+                const previous = database.prepare('SELECT account FROM telegram_users WHERE telegram_id=?').get(id);
+                if (previous) return move(previous.account, row.account);
                 database.prepare('INSERT INTO telegram_users VALUES (?,?,?,?)').run(id, row.account, token(), now());
                 database.prepare('DELETE FROM telegram_codes WHERE digest=?').run(hash(code));
                 return { linked: true };
             });
         },
         unlink(account) {
-            api.account(account);
+            if (api.account(account).email === null) throw new Error('EMAIL_REQUIRED');
             return transact(() => {
                 database.prepare('DELETE FROM telegram_users WHERE account=?').run(account);
                 database.prepare('DELETE FROM telegram_codes WHERE account=?').run(account);

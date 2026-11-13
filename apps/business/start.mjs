@@ -19,7 +19,7 @@ const enabled = name => { if (!['true', 'false'].includes(process.env[name] ?? '
 if (!enabled('PORTAL_ENABLED')) throw new Error('PORTAL_NOT_AUTHORIZED');
 mkdirSync('/state', { recursive: true, mode: 0o700 });
 mkdirSync('/business-bridge', { recursive: true, mode: 0o700 });
-store = createBusinessStore({ filename: '/state/business.sqlite', reconciliationEnabled: enabled('BILLING_RECONCILIATION_ENABLED'), reviewDelayMs: Number(process.env.BILLING_REVIEW_DELAY_SECONDS ?? 900) * 1000, customerEnabled: enabled('CUSTOMER_BOT_ENABLED') });
+store = createBusinessStore({ filename: '/state/business.sqlite', reconciliationEnabled: enabled('BILLING_RECONCILIATION_ENABLED'), reviewDelayMs: Number(process.env.BILLING_REVIEW_DELAY_SECONDS ?? 900) * 1000, customerEnabled: enabled('CUSTOMER_BOT_ENABLED'), customerSignupEnabled: process.env.CUSTOMER_SIGNUP_ENABLED !== 'false' });
 for (const item of JSON.parse(readFileSync(new URL('./faq.json', import.meta.url), 'utf8'))) store.addKnowledge(item.id, item.aliases, item.answer);
 const supportAi = enabled('SUPPORT_AI_ENABLED');
 const support = createSupport({ store, search: enabled('SEARCH_ENABLED') ? createReferenceSearch({ store, allowedHosts: (process.env.SEARCH_ALLOWED_HOSTS ?? 'docs.rw').split(','), dailyLimit: Number(process.env.SEARCH_DAILY_LIMIT ?? 0) }) : undefined, answer: supportAi ? value => new Promise((resolve, reject) => {
@@ -35,11 +35,12 @@ const panelRead = client ? async id => {
     if (user?.id !== id || !['ACTIVE', 'DISABLED', 'EXPIRED', 'LIMITED'].includes(user.status) || typeof user.expireAt !== 'string') throw new Error('PANEL_UNAVAILABLE');
     return { status: user.status, expireAt: user.expireAt, observedAt: new Date().toISOString() };
 } : undefined;
-portal = createPortal({ store, support, origin: process.env.PORTAL_PUBLIC_ORIGIN, billingEnabled: manualBilling, guides: createGuideLibrary(), analyzeMedia: enabled('MEDIA_ENABLED') ? createMediaAnalyzer({ applications: process.env.MEDIA_ALLOWED_APPS ?? 'happ' }) : undefined, maxMediaBytes: Number(process.env.MEDIA_MAX_BYTES ?? 5242880), plans: { RUB: { units: Number(process.env.PLAN_RUB_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) }, USDT: { units: Number(process.env.PLAN_USDT_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) } }, panelRead, customerUsername: enabled('CUSTOMER_BOT_ENABLED') ? process.env.CUSTOMER_BOT_USERNAME : undefined });
+const miniAppUrl = enabled('PORTAL_MINI_APP_ENABLED') ? new URL('/miniapp', process.env.PORTAL_PUBLIC_ORIGIN).href : undefined;
+portal = createPortal({ store, support, origin: process.env.PORTAL_PUBLIC_ORIGIN, billingEnabled: manualBilling, guides: createGuideLibrary(), analyzeMedia: enabled('MEDIA_ENABLED') ? createMediaAnalyzer({ applications: process.env.MEDIA_ALLOWED_APPS ?? 'happ' }) : undefined, maxMediaBytes: Number(process.env.MEDIA_MAX_BYTES ?? 5242880), plans: { RUB: { units: Number(process.env.PLAN_RUB_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) }, USDT: { units: Number(process.env.PLAN_USDT_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) } }, panelRead, customerUsername: enabled('CUSTOMER_BOT_ENABLED') ? process.env.CUSTOMER_BOT_USERNAME : undefined, miniAppEnabled: !!miniAppUrl });
 if (enabled('CUSTOMER_BOT_ENABLED')) {
     const path = '/customer-bridge/customer.sock'; mkdirSync('/customer-bridge', { recursive: true, mode: 0o700 });
     if (existsSync(path)) { if (!statSync(path).isSocket()) throw new Error('INVALID_CUSTOMER_SOCKET'); unlinkSync(path); }
-    customer = createServer(createCustomerGateway({ store, username: process.env.CUSTOMER_BOT_USERNAME, panelRead }));
+    customer = createServer(createCustomerGateway({ store, username: process.env.CUSTOMER_BOT_USERNAME, panelRead, miniAppUrl }));
     customer.headersTimeout = 5000; customer.requestTimeout = 5000; customer.timeout = 20000; customer.maxConnections = 8;
     customer.on('clientError', (_error, connection) => connection.destroy());
     await new Promise(resolve => customer.listen(path, resolve)); chmodSync(path, 0o600);

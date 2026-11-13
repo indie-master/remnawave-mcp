@@ -114,7 +114,7 @@ export function createBusinessAdmin({ actorId, administration, call = createBusi
             if (data === 'business_renewals') return reply('<b>Заявки продления</b>\nСтоимость и срок фиксируются при создании заявки, окончательное изменение — только после подтверждения.', [...pending.renewals.filter(value => /^[a-f0-9]{24}$/.test(value.id) && Number.isSafeInteger(value.panel_id)).slice(0, 10).map(value => [{ text: `Продлить #${value.panel_id}`, callback_data: `br:${value.id}` }]), [{ text: '🏠 Меню', callback_data: 'home' }]]);
             if (data === 'business_support' || text === 'поддержка') {
                 const tickets = (pending.support ?? []).filter(value => /^[a-f0-9]{24}$/.test(value.id) && Number.isSafeInteger(value.panel_id));
-                return reply(`<b>Поддержка: ${tickets.length}</b>\nПоказаны первые 10 обращений.`, [...tickets.slice(0, 10).map(value => [{ text: `Пользователь #${value.panel_id}`, callback_data: `bh:${value.id}` }]), [{ text: '🏠 Меню', callback_data: 'home' }]]);
+                return reply(`<b>Поддержка: ${tickets.length}</b>\nПоказаны первые 10 обращений.`, [...tickets.slice(0, 10).map(value => [{ text: value.panel_id > 0 ? `Пользователь #${value.panel_id}` : `Клиент Telegram · ${value.id.slice(0, 6)}`, callback_data: `bh:${value.id}` }]), [{ text: '🏠 Меню', callback_data: 'home' }]]);
             }
             if (data?.startsWith('bp:') || paymentReference) {
                 const payment = pending.payments.find(value => value.id === (paymentReference?.[1] ?? data.slice(3)));

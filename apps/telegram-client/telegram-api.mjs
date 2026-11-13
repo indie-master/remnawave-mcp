@@ -5,7 +5,7 @@ export class TelegramError extends Error {
     }
 }
 
-export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, signal, enableButtons = false, enableSubscriptionButtons = false }) {
+export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, signal, enableButtons = false, enableSubscriptionButtons = false, enableMiniAppButtons = false }) {
     if (typeof token !== 'string' || !/^[1-9]\d{4,19}:[A-Za-z0-9_-]{30,128}$/.test(token) || !Number.isSafeInteger(allowedUserId) || allowedUserId <= 0)
         throw new TelegramError('INVALID_LOCAL_CONFIGURATION');
 
@@ -66,6 +66,7 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
         if (!item || typeof item.text !== 'string' || item.text.length < 1 || item.text.length > 64) return false;
         const keys = Object.keys(item).sort().join(',');
         if (keys === 'callback_data,text') return typeof item.callback_data === 'string' && /^[A-Za-z0-9_:-]{1,64}$/.test(item.callback_data);
+        if (keys === 'text,web_app' && enableMiniAppButtons && item.web_app && Object.keys(item.web_app).join(',') === 'url') return safeMiniApp(item.web_app.url);
         if (!enableSubscriptionButtons) return false;
         const link = keys === 'text,url' ? item.url : keys === 'copy_text,text' && item.copy_text && Object.keys(item.copy_text).join(',') === 'text' ? item.copy_text.text : undefined;
         if (typeof link !== 'string' || link.length > (keys === 'copy_text,text' ? 256 : 2048) || /[\u0000-\u0020\u007f]/.test(link)) return false;
@@ -73,6 +74,10 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
             const address = new URL(link);
             return address.protocol === 'https:' && !!address.hostname && !address.username && !address.password;
         } catch { return false; }
+    }
+    function safeMiniApp(value) {
+        if (typeof value !== 'string' || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) return false;
+        try { const url = new URL(value); return url.protocol === 'https:' && !!url.hostname && url.pathname === '/miniapp' && !url.username && !url.password && !url.search && !url.hash; } catch { return false; }
     }
 
     return {
@@ -91,6 +96,10 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
             return Buffer.concat(chunks);
         },
         getMe: () => call('getMe', {}),
+        ...(enableMiniAppButtons ? { setMiniAppMenu: async url => {
+            if (!safeMiniApp(url)) throw new TelegramError('REPLY_BLOCKED');
+            return call('setChatMenuButton', { menu_button: { type: 'web_app', text: 'Кабинет', web_app: { url } } });
+        } } : {}),
         getWebhookInfo: () => call('getWebhookInfo', {}),
         getUpdates: async offset => {
             if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0))

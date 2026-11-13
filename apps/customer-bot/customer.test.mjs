@@ -16,6 +16,8 @@ function fixture() {
     const call = async (path, value) => {
         calls.push({ path, value });
         if (path === '/ready') return { ready: true, botUsername: config.username };
+        if (path === '/identity') return store.customer.registerBot(value.username, value.botId);
+        if (path === '/bootstrap') return store.customer.ensure(value);
         if (path === '/account') return store.customer.account(value.telegramId);
         if (path === '/history') return { history: store.customer.history(value.telegramId) };
         if (path === '/question') return store.customer.question(value.telegramId, value.key, value.text);

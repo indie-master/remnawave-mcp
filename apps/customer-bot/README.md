@@ -1,8 +1,22 @@
-# Отдельный клиентский Telegram-бот
+import { createServer } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { redactSupport } from './store.mjs';
+import { verifyTelegramLaunch } from './telegram-auth.mjs';
 
-Модуль предназначен для пользователей сервиса. Административный бот сохраняет управление панелью и очередь поддержки. Клиентский бот использует другой токен, контейнер, состояние и Unix-сокет. Он не получает токены панели, Codex-авторизацию, административный сокет и Docker socket.
+const sessionToken = request => request.headers.authorization !== undefined ? request.headers.authorization.match(/^Bearer ([a-f0-9]{64})$/)?.[1] : request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
 
-Доступны кнопки своего аккаунта, поддержки, переписки и меню. Обычный текст добавляется в ту же историю, что и в кабинете. Локальные FAQ отвечают без модели; неизвестное обращение передаётся администратору. Последующие уточнения не создают повторных заглушек. Ответ администратора появляется в кабинете и доставляется именно клиентским ботом. Платёжные подтверждения, изменение пользователей и ИИ здесь не подключены.
+export function createPortal({ store, support, origin, panelRead, billingEnabled = false, plans = {}, analyzeMedia, maxMediaBytes = 5242880, guides, customerUsername, miniAppEnabled = false, verifyLaunch = verifyTelegramLaunch }) {
+    const publicOrigin = new URL(origin);
+    const local = publicOrigin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(publicOrigin.hostname);
+    if ((!local && publicOrigin.protocol !== 'https:') || publicOrigin.pathname !== '/' || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error('INVALID_PORTAL_ORIGIN');
+    if (miniAppEnabled && (local || !store.customer.enabled || !customerUsername)) throw new Error('INVALID_MINI_APP_CONFIGURATION');
+    const html = readFileSync(new URL('./portal.html', import.meta.url), 'utf8');
+    const availablePlans = billingEnabled ? ['RUB', 'USDT'].flatMap(currency => {
+        const plan = plans[currency];
+        return plan && Number.isSafeInteger(plan.units) && plan.units > 0 && plan.units <= 100000000000 && Number.isInteger(plan.days) && plan.days >= 1 && plan.days <= 366 ? [{ currency, units: plan.units, days: plan.dнных запуска пять минут. Токен бота не передаётся кабинету. Подпись проверяется до регистрации и выдачи сессии; повтор чужого запуска без действующей сессии отклоняется.
+
+Обычный сайт сохраняет запрет встраивания, SDK Telegram загружается только на `/miniapp`. Для веб-версии Telegram предусмотрена сессия в памяти страницы, если браузер блокирует сторонние cookies; она не сохраняется в localStorage и не добавляется в URL. Origin и CSRF проверяются для изменений. После выхода или истечения сеанса откройте Mini App заново кнопкой бота. ИИ и бюджет для регистрации, привязок и входа не используются.
 
 ## Подготовка и включение
 
@@ -46,7 +60,7 @@ Username в двух настройках должен совпадать. Ка�
 
 ## Привязка и общая приёмка
 
-Войдите в кабинет тестового пользователя. В разделе «Ваш Telegram» нажмите «Подключить Telegram», затем откройте созданную ссылку и нажмите «Запустить» в новом боте. Используется стандартная [ссылка Telegram с параметром start](https://core.telegram.org/bots/features#deep-linking). Код создаётся только в авторизованной сессии с CSRF-проверкой, действует пять минут и используется один раз. В SQLite хранится его хеш. Не пересылайте ссылку другому человеку.
+Можно начать обычным `/start` и открыть Mini App либо войти в кабинет тестового пользователя. Для второго пути в разделе «Ваш Telegram» нажмите «Подключить Telegram», затем откройте созданную ссылку и нажмите «Запустить» в новом боте. Используется стандартная [ссылка Telegram с параметром start](https://core.telegram.org/bots/features#deep-linking). Код создаётся только в авторизованной сессии с CSRF-проверкой, действует пять минут и используется один раз. В SQLite хранится его хеш. Не пересылайте ссылку другому человеку.
 
 Знание username, email или числового ID не привязывает аккаунт. Одна Telegram-учётная запись соответствует одному кабинету, а одна учётная запись кабинета — одному Telegram ID. Привязка локальная: Telegram-поле в Remnawave не меняется автоматически. Ссылки подписки и пароли боту не передаются. При необходимости отвяжите Telegram кнопкой кабинета; чтение и новые отложенные доставки прежнему получателю будут запрещены.
 
@@ -57,7 +71,7 @@ Username в двух настройках должен совпадать. Ка�
 3. Администратор открывает карточку и пишет обычный ответ. Ответ должен появиться в кабинете и в личном чате **клиентского** бота. Дополнительное меню под каждым человеческим ответом не отправляется.
 4. В кабинете нажать «Отвязать Telegram». Старый Telegram больше не должен читать аккаунт и переписку. Повторное подключение — только по новой ссылке кабинета.
 
-Первый тест выполняется через прежний SSH-туннель кабинета; публичный домен для него не требуется. Самостоятельная регистрация, SMTP, публичный запуск сайта и подключение ИИ остаются отдельными расширениями.
+Прежний сценарий с закрытым кабинетом проверяется через SSH-туннель; публичный домен для него не требуется. Telegram-first регистрация работает в боте; автоматический вход Mini App проверяется на публичном HTTPS-домене. Самостоятельная регистрация по почте без Telegram, SMTP и подключение ИИ остаются отдельными расширениями.
 
 ## Доставка и перенос
 

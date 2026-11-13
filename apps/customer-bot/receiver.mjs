@@ -8,8 +8,10 @@ export async function runCustomerBot({ api, call, config, signal, now = Date.now
         if (!Number.isSafeInteger(identity?.id) || identity.id <= 0 || identity.is_bot !== true || identity.username?.toLowerCase() !== config.username.toLowerCase() || identity.username.toLowerCase() === config.adminUsername.toLowerCase()) throw new Error('BOT_IDENTITY_MISMATCH');
         const webhook = await api.getWebhookInfo(); if (webhook?.url !== '') throw new Error('WEBHOOK_BLOCKED');
         const ready = await call('/ready'); if (!ready?.ready || ready.botUsername?.toLowerCase() !== config.username.toLowerCase()) throw new Error('BOT_IDENTITY_MISMATCH');
+        await call('/identity', { botId: identity.id, username: identity.username });
+        if (ready.miniAppUrl && api.setMiniAppMenu) await api.setMiniAppMenu(ready.miniAppUrl);
         let offset = await loadOffset(); if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0)) throw new Error('INVALID_STATE');
-        const handle = createCustomerHandler({ call, send: api.send, edit: api.edit, answerCallback: api.answerCallback, botId: identity.id, now });
+        const handle = createCustomerHandler({ call, send: api.send, edit: api.edit, answerCallback: api.answerCallback, botId: identity.id, miniAppUrl: ready.miniAppUrl, now });
         onEvent({ ready: true, customerBot: true, subscriptionAi: false });
         let errors = 0;
         while (!signal?.aborted) {

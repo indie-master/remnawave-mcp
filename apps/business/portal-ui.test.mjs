@@ -5,7 +5,7 @@ import { Script, createContext } from 'node:vm';
 
 const html = readFileSync(new URL('./portal.html', import.meta.url), 'utf8');
 const source = html.match(/<script nonce="__NONCE__">([\s\S]*?)<\/script>/)[1];
-function browser(account) {
+function browser(account, miniApp) {
     class Element {
         constructor(id = '') { this.id = id; this.value = ''; this.textContent = ''; this.disabled = false; this.children = []; this.classes = new Set(); this.classList = { add: value => this.classes.add(value), remove: value => this.classes.delete(value), toggle: (value, enabled) => enabled ? this.classes.add(value) : this.classes.delete(value) }; }
         append(...values) { this.children.push(...values); if (this.id === 'renewalPlan' && !this.value) this.value = values[0].value; }
@@ -16,7 +16,7 @@ function browser(account) {
     const buttons = [...html.matchAll(/<button(?: id="([^"]+)")?/g)].map(value => elements[value[1]] ?? new Element());
     const calls = []; let next; let poll;
     const document = { visibilityState: 'visible', getElementById: id => elements[id], createElement: () => new Element(), querySelectorAll: () => buttons, body: new Element() };
-    const context = createContext({ document, setInterval: (callback, milliseconds) => { assert.equal(milliseconds, 5000); poll = callback; }, location: { reload() {} }, URL, fetch: async (path, options) => {
+    const context = createContext({ ...(miniApp ? { window: { Telegram: { WebApp: miniApp } } } : {}), document, setInterval: (callback, milliseconds) => { assert.equal(milliseconds, 5000); poll = callback; }, location: { reload() {} }, URL, fetch: async (path, options) => {
         calls.push({ path, options });
         if (next) { const reply = next; next = undefined; return reply; }
         return { ok: true, json: async () => account };
@@ -25,6 +25,23 @@ function browser(account) {
     return { elements, calls, document, poll: () => poll(), respond: response => { next = response; }, settle: () => new Promise(setImmediate) };
 }
 const account = (features, plans = []) => ({ email: 'pilot@example.invalid', csrf: 'synthetic-csrf', balances: { RUB: 0, USDT: 0 }, payments: [], renewals: [], history: [], features, plans });
+
+test('Mini App uses only signed initData and shows email connection for a Telegram-first account', async () => {
+    let ready = 0; let expand = 0;
+    const value = { ...account({ billing: false, panel: false, media: false }), sessionKey: 'a'.repeat(64), email: null, panelId: null, profileName: 'Тест Клиент' };
+    const page = browser(value, { initData: 'synthetic-signed-launch', initDataUnsafe: { user: { id: 'must-not-trust' } }, ready: () => ready++, expand: () => expand++ }); await page.settle();
+    assert.equal(ready, 1); assert.equal(expand, 1);
+    assert.equal(page.calls[0].path, '/api/telegram-login');
+    assert.deepEqual(JSON.parse(page.calls[0].options.body), { initData: 'synthetic-signed-launch' });
+    assert.equal(page.calls[1].options.headers.Authorization, 'Bearer ' + 'a'.repeat(64));
+    assert.ok(!page.elements.emailSection.classes.has('hidden')); assert.match(page.elements.details.textContent, /Тест Клиент/);
+    page.elements.emailMode.value = 'existing'; page.elements.connectEmail.value = 'existing@example.invalid'; page.elements.connectPassword.value = 'synthetic-password-only';
+    await page.elements.emailConnectForm.onsubmit({ preventDefault() {} }); await page.settle();
+    assert.equal(page.calls.find(value => value.path === '/api/email-connect').options.method, 'POST');
+    assert.equal(page.elements.connectPassword.value, '');
+    page.respond({ ok: false, json: async () => ({ code: 'SESSION_EXPIRED' }) }); await page.poll();
+    assert.ok(page.elements.emailSection.classes.has('hidden')); assert.equal(page.elements.connectEmail.value, '');
+});
 
 test('customer screen hides disabled billing and panel actions without losing local support', async () => {
     const page = browser(account({ billing: false, panel: false, media: false })); await page.settle();

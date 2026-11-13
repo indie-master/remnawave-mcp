@@ -3,8 +3,14 @@ const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', 
 const money = (value, divisor) => Number.isSafeInteger(value) ? (value / divisor).toLocaleString('ru-RU', { maximumFractionDigits: divisor === 100 ? 2 : 6 }) : 'недоступно';
 const excerpt = value => { let output = ''; for (const c of String(value).slice(0, 300)) { const item = escape(c); if (output.length + item.length > 350) return output + '…'; output += item; } return output; };
 
-export function createCustomerHandler({ call, send, edit, answerCallback, botId, now = Date.now }) {
+export function createCustomerHandler({ call, send, edit, answerCallback, botId, miniAppUrl, now = Date.now }) {
     const attempts = new Map();
+    let keyboard = customerKeyboard;
+    if (miniAppUrl) {
+        const url = new URL(miniAppUrl);
+        if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/miniapp') throw new Error('INVALID_MINI_APP_URL');
+        keyboard = { inline_keyboard: [[{ text: '📱 Личный кабинет', web_app: { url: url.href } }], ...customerKeyboard.inline_keyboard] };
+    }
     return async update => {
         const callback = update?.callback_query; const message = callback?.message ?? update?.message; const from = callback?.from ?? message?.from;
         if (!Number.isSafeInteger(update?.update_id) || update.update_id < 0 || !message || message.chat?.type !== 'private' || !Number.isSafeInteger(from?.id) || from.id <= 0 || from.is_bot !== false || from.id !== message.chat.id || message.forward_origin || message.forward_from || message.forward_from_chat) return;
@@ -16,9 +22,9 @@ export function createCustomerHandler({ call, send, edit, answerCallback, botId,
         while (attempts.size >= 1000) attempts.delete(attempts.keys().next().value);
         attempts.set(id, { at: count === 1 ? now() : previous.at, count });
         if (count > 12) return;
-        const reply = async (text, keyboard = customerKeyboard) => {
-            if (callback && edit) { try { return await edit(id, message.message_id, text, keyboard); } catch (error) { if (error?.code !== 'EDIT_UNAVAILABLE') throw error; } }
-            return send(id, text, keyboard);
+        const reply = async (text, markup = keyboard) => {
+            if (callback && edit) { try { return await edit(id, message.message_id, text, markup); } catch (error) { if (error?.code !== 'EDIT_UNAVAILABLE') throw error; } }
+            return send(id, text, markup);
         };
         const text = callback ? '' : message.text.trim();
         const action = callback?.data;
@@ -26,11 +32,15 @@ export function createCustomerHandler({ call, send, edit, answerCallback, botId,
             const start = text.match(/^\/start\s+([A-Za-z0-9_-]{32})$/);
             if (start) { await call('/link', { telegramId: id, code: start[1] }); await reply('✅ Аккаунт привязан. Здесь доступны ваши сведения и переписка с поддержкой.'); return; }
             if (text.startsWith('/start ') || (action && !['customer_home', 'customer_account', 'customer_history', 'customer_support'].includes(action))) { await reply('Используйте кнопки меню. Для привязки откройте новую ссылку из своего кабинета.'); return; }
+            if (text === '/start') {
+                await call('/bootstrap', { telegramId: id, firstName: typeof from.first_name === 'string' ? from.first_name : '', lastName: typeof from.last_name === 'string' ? from.last_name : '' });
+                await reply('Добро пожаловать! Ваш аккаунт готов. Здесь можно проверить подписку и написать поддержке.' + (miniAppUrl ? ' Откройте «Личный кабинет», чтобы подключить почту или существующий аккаунт.' : ' Личный кабинет будет доступен после подключения защищённого адреса.')); return;
+            }
             if (action === 'customer_account') {
                 const value = await call('/account', { telegramId: id });
                 const subscription = value.subscription;
                 const state = subscription && ['ACTIVE', 'DISABLED', 'EXPIRED', 'LIMITED'].includes(subscription.status) && typeof subscription.expireAt === 'string' && Number.isFinite(Date.parse(subscription.expireAt)) ? `\nСтатус: ${escape(subscription.status)}\nДо: ${escape(new Date(subscription.expireAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }))} МСК\nПроверено: ${escape(String(subscription.observedAt ?? '').slice(0, 40))}` : '\nСведения о подписке сейчас недоступны.';
-                await reply(`<b>Ваш аккаунт</b>\nБаланс RUB: ${money(value.balances?.RUB, 100)}\nБаланс USDT: ${money(value.balances?.USDT, 1000000)}${state}`); return;
+                await reply(`<b>Ваш аккаунт</b>${value.profileName ? '\n' + escape(value.profileName) : ''}\nБаланс RUB: ${money(value.balances?.RUB, 100)}\nБаланс USDT: ${money(value.balances?.USDT, 1000000)}${value.panelLinked === false ? '\nПодписка ещё не подключена. Обратитесь в поддержку.' : state}`); return;
             }
             if (action === 'customer_history') {
                 const value = await call('/history', { telegramId: id });

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
 import { createCustomerStore } from './customer-store.mjs';
+import { createIdentityStore } from './identity.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const emailAddress = value => typeof value === 'string' && value.length <= 254 && /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(value);
@@ -9,7 +10,7 @@ const unitsValid = value => Number.isSafeInteger(value) && value > 0 && value <=
 export const redactSupport = value => String(value).replace(/https?:\/\/\S+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|\b\d{5,20}:[A-Za-z0-9_-]{30,}\b|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\b(?:\d{1,3}\.){3}\d{1,3}\b/gi, '[скрыто]').slice(0, 500);
 const normalize = value => redactSupport(value).normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ').trim();
 
-export function createBusinessStore({ filename, now = Date.now, reconciliationEnabled = false, reviewDelayMs = 900000, customerEnabled = false }) {
+export function createBusinessStore({ filename, now = Date.now, reconciliationEnabled = false, reviewDelayMs = 900000, customerEnabled = false, customerSignupEnabled = true }) {
     if (typeof reconciliationEnabled !== 'boolean' || !Number.isSafeInteger(reviewDelayMs) || reviewDelayMs < 300000 || reviewDelayMs > 86400000) throw new Error('INVALID_RECONCILIATION_CONFIGURATION');
     const database = new DatabaseSync(filename);
     database.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=3000;
@@ -37,11 +38,19 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
     const transact = work => { database.exec('BEGIN IMMEDIATE'); try { const result = work(); database.exec('COMMIT'); return result; } catch (error) { database.exec('ROLLBACK'); throw error; } };
     const account = id => { const value = database.prepare('SELECT id,email,panel_id FROM accounts WHERE id=?').get(id); if (!value) throw new Error('ACCOUNT_UNAVAILABLE'); return value; };
     const balance = (id, currency) => database.prepare('SELECT coalesce(sum(units),0) AS balance FROM ledger WHERE account=? AND currency=?').get(id, currency).balance;
+    const identity = createIdentityStore({ database, now });
+    const issueSession = (id, telegram) => {
+        account(id); database.prepare('DELETE FROM sessions WHERE expires<?').run(now()); identity.cleanSessions();
+        const token = randomBytes(32).toString('hex'); const csrf = randomBytes(24).toString('hex');
+        database.prepare('INSERT INTO sessions VALUES (?,?,?,?)').run(hash(token), id, csrf, now() + 3600000);
+        if (telegram) database.prepare('INSERT INTO telegram_sessions VALUES (?,?,?)').run(hash(token), telegram.telegram_id, telegram.nonce);
+        return { token, csrf, accountId: id };
+    };
     let customer;
     const api = {
         reconciliationEnabled,
         provision(email, password, panelId) {
-            if (!emailAddress(email) || typeof password !== 'string' || password.length < 12 || password.length > 128 || !Number.isSafeInteger(panelId) || panelId <= 0) throw new Error('INVALID_ACCOUNT');
+            if (!emailAddress(email) || email.toLowerCase().endsWith('@accounts.invalid') || typeof password !== 'string' || password.length < 12 || password.length > 128 || !Number.isSafeInteger(panelId) || panelId <= 0) throw new Error('INVALID_ACCOUNT');
             const id = randomBytes(12).toString('hex'); const salt = randomBytes(16).toString('hex');
             database.prepare('INSERT INTO accounts VALUES (?,?,?,?,?)').run(id, email.toLowerCase(), salt, scryptSync(password, salt, 32).toString('hex'), panelId);
             return { id };
@@ -54,205 +63,7 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
                 if ((database.prepare('SELECT count FROM attempts WHERE key=?').get(key)?.count ?? 0) >= 5) throw new Error('LOGIN_FAILED');
                 database.prepare('INSERT INTO attempts VALUES (?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1').run(key, now() + 900000);
             });
-            const row = database.prepare('SELECT * FROM accounts WHERE email=?').get(email.toLowerCase());
-            const result = scryptSync(password, row?.salt ?? 'dummy-salt', 32);
-            if (!row || !timingSafeEqual(result, Buffer.from(row.password, 'hex'))) throw new Error('LOGIN_FAILED');
-            database.prepare('DELETE FROM attempts WHERE key=?').run(key);
-            database.prepare('DELETE FROM sessions WHERE expires<?').run(now());
-            const token = randomBytes(32).toString('hex'); const csrf = randomBytes(24).toString('hex');
-            database.prepare('INSERT INTO sessions VALUES (?,?,?,?)').run(hash(token), row.id, csrf, now() + 3600000);
-            return { token, csrf, accountId: row.id };
-        },
-        session(token) {
-            if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) throw new Error('SESSION_EXPIRED');
-            const row = database.prepare('SELECT account,csrf FROM sessions WHERE token=? AND expires>?').get(hash(token), now());
-            if (!row) throw new Error('SESSION_EXPIRED');
-            return row;
-        },
-        logout(token) { database.prepare('DELETE FROM sessions WHERE token=?').run(hash(token)); },
-        account(id) { const value = account(id); return { email: value.email, panelId: value.panel_id, balances: { RUB: balance(id, 'RUB'), USDT: balance(id, 'USDT') } }; },
-        payment(id, currency, units) {
-            account(id);
-            if (!currencyValid(currency) || !unitsValid(units)) throw new Error('INVALID_PAYMENT');
-            if (database.prepare('SELECT count(*) AS count FROM payments WHERE account=? AND state=?').get(id, 'pending').count >= 3) throw new Error('PAYMENT_PENDING');
-            const paymentId = randomBytes(12).toString('hex');
-            database.prepare('INSERT INTO payments VALUES (?,?,?,?,?,?)').run(paymentId, id, currency, units, 'pending', now());
-            return { id: paymentId, state: 'pending', note: 'Баланс не зачислен. Администратор должен проверить поступление вручную.' };
-        },
-        payments(id) { account(id); return database.prepare('SELECT id,currency,units,state,created FROM payments WHERE account=? ORDER BY created DESC LIMIT 20').all(id); },
-        pendingPayments() { return database.prepare('SELECT payments.id,payments.currency,payments.units,payments.created,accounts.panel_id FROM payments JOIN accounts ON accounts.id=payments.account WHERE payments.state=? ORDER BY payments.created LIMIT 20').all('pending'); },
-        approvePayment(paymentId, reference) {
-            if (typeof reference !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{1,19}:[A-Za-z0-9:_-]{4,100}$/.test(reference)) throw new Error('PAYMENT_REFERENCE_REQUIRED');
-            return transact(() => {
-                const row = database.prepare('SELECT * FROM payments WHERE id=? AND state=?').get(paymentId, 'pending');
-                if (!row) throw new Error('PAYMENT_NOT_PENDING');
-                if (!Number.isSafeInteger(balance(row.account, row.currency) + row.units)) throw new Error('BALANCE_LIMIT');
-                database.prepare('INSERT INTO manual_receipts VALUES (?,?)').run(hash(reference.toLowerCase()), paymentId);
-                database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run(paymentId, row.account, row.currency, row.units, now());
-                database.prepare('UPDATE payments SET state=? WHERE id=?').run('approved', paymentId);
-                audit('payment', paymentId, 'approved');
-                return { credited: true, currency: row.currency, units: row.units };
-            });
-        },
-        rejectPayment(paymentId) { return transact(() => { const result = database.prepare('UPDATE payments SET state=? WHERE id=? AND state=?').run('rejected', paymentId, 'pending'); if (result.changes) audit('payment', paymentId, 'rejected'); return { rejected: result.changes === 1 }; }); },
-        requestRenewal(id, currency, plan) {
-            account(id);
-            if (!currencyValid(currency) || !plan || !unitsValid(plan.units) || !Number.isInteger(plan.days) || plan.days < 1 || plan.days > 366) throw new Error('RENEWAL_PLAN_UNAVAILABLE');
-            if (balance(id, currency) < plan.units) throw new Error('INSUFFICIENT_BALANCE');
-            return transact(() => {
-                if (balance(id, currency) < plan.units) throw new Error('INSUFFICIENT_BALANCE');
-                if (database.prepare("SELECT id FROM renewal_requests WHERE account=? AND state IN ('pending','executing','uncertain')").get(id)) throw new Error('RENEWAL_PENDING');
-                const requestId = randomBytes(12).toString('hex');
-                database.prepare('INSERT INTO renewal_requests VALUES (?,?,?,?,?,?,?,NULL)').run(requestId, id, 'pending', now(), currency, plan.units, plan.days);
-                audit('renewal', requestId, 'pending');
-                return { id: requestId, state: 'pending', note: 'Запрос передан администратору. Подписка пока не продлена, баланс не списан.' };
-            });
-        },
-        renewals(id) { account(id); return database.prepare('SELECT id,currency,units,days,state,created FROM renewal_requests WHERE account=? ORDER BY created DESC,id DESC LIMIT 20').all(id); },
-        billingHistory() { return database.prepare('SELECT operation,subject,state,created,note FROM billing_audit ORDER BY created DESC,id DESC LIMIT 20').all(); },
-        recoveryCases() {
-            if (!reconciliationEnabled) throw new Error('RECONCILIATION_DISABLED');
-            return database.prepare("SELECT renewal.id,account.panel_id,renewal.state,clock.started FROM renewal_requests renewal JOIN accounts account ON account.id=renewal.account JOIN renewal_clock clock ON clock.id=renewal.id WHERE renewal.state IN ('executing','uncertain') ORDER BY clock.started,renewal.id LIMIT 20").all().map(row => ({ ...row, readyAt: row.started + reviewDelayMs }));
-        },
-        recoveryCase(id) {
-            if (!reconciliationEnabled) throw new Error('RECONCILIATION_DISABLED');
-            if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id)) throw new Error('INVALID_RECONCILIATION');
-            const row = database.prepare("SELECT renewal.id,account.panel_id,renewal.state,renewal.proposal,renewal.currency,renewal.units,renewal.days,clock.started FROM renewal_requests renewal JOIN accounts account ON account.id=renewal.account JOIN renewal_clock clock ON clock.id=renewal.id WHERE renewal.id=? AND renewal.state IN ('executing','uncertain')").get(id);
-            if (!row || !unitsValid(row.units) || !currencyValid(row.currency) || !Number.isSafeInteger(row.panel_id) || row.panel_id <= 0 || !Number.isSafeInteger(row.started) || row.started < 0 || !Number.isSafeInteger(row.started + reviewDelayMs) || !/^[A-Za-z0-9_-]{16}$/.test(row.proposal ?? '')) throw new Error('RECONCILIATION_UNAVAILABLE');
-            return { ...row, readyAt: row.started + reviewDelayMs, observedAt: now() };
-        },
-        reconcileRenewal(id, { state, proposal, outcome, note } = {}) {
-            if (!reconciliationEnabled) throw new Error('RECONCILIATION_DISABLED');
-            if (!['executing', 'uncertain'].includes(state) || typeof proposal !== 'string' || !/^[A-Za-z0-9_-]{16}$/.test(proposal) || !['done', 'refunded'].includes(outcome) || typeof note !== 'string' || note.trim().length < 8 || note.length > 200 || /[\u0000-\u001f\u007f]/.test(note) || redactSupport(note) !== note) throw new Error('INVALID_RECONCILIATION');
-            return transact(() => {
-                const row = api.recoveryCase(id);
-                if (row.state !== state || row.proposal !== proposal || now() < row.readyAt) throw new Error('RECONCILIATION_NOT_READY');
-                if (outcome === 'refunded') {
-                    const owner = database.prepare('SELECT account FROM renewal_requests WHERE id=?').get(id).account;
-                    if (!Number.isSafeInteger(balance(owner, row.currency) + row.units)) throw new Error('BALANCE_LIMIT');
-                    database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run('renewal-refund:' + id, owner, row.currency, row.units, now());
-                }
-                const next = outcome === 'done' ? 'done' : 'rejected';
-                const updated = database.prepare('UPDATE renewal_requests SET state=? WHERE id=? AND state=? AND proposal=?').run(next, id, state, proposal);
-                if (updated.changes !== 1) throw new Error('RECONCILIATION_UNAVAILABLE');
-                audit('reconciliation', id, next, note.trim());
-                return { settled: true, outcome };
-            });
-        },
-        pendingRenewals() { return database.prepare('SELECT renewal.id,account.panel_id,renewal.currency,renewal.units,renewal.days FROM renewal_requests renewal JOIN accounts account ON account.id=renewal.account WHERE renewal.state=? ORDER BY renewal.created LIMIT 20').all('pending'); },
-        reserveRenewal(id, proposal) {
-            if (!/^[A-Za-z0-9_-]{16}$/.test(proposal)) throw new Error('INVALID_RENEWAL');
-            return transact(() => {
-                const row = database.prepare('SELECT * FROM renewal_requests WHERE id=? AND state=?').get(id, 'pending');
-                if (!row || balance(row.account, row.currency) < row.units) throw new Error('RENEWAL_UNAVAILABLE');
-                database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run('renewal:' + id, row.account, row.currency, -row.units, now());
-                database.prepare('UPDATE renewal_requests SET state=?,proposal=? WHERE id=?').run('executing', proposal, id);
-                database.prepare('INSERT INTO renewal_clock VALUES (?,?)').run(id, now());
-                audit('renewal', id, 'executing');
-                return { reserved: true };
-            });
-        },
-        settleRenewal(id, outcome) {
-            if (!['done', 'rejected', 'uncertain'].includes(outcome)) throw new Error('INVALID_RENEWAL');
-            return transact(() => {
-                const row = database.prepare('SELECT * FROM renewal_requests WHERE id=? AND state=?').get(id, 'executing');
-                if (!row) throw new Error('RENEWAL_UNAVAILABLE');
-                if (outcome === 'rejected') database.prepare('INSERT INTO ledger VALUES (?,?,?,?,?)').run('renewal-refund:' + id, row.account, row.currency, row.units, now());
-                database.prepare('UPDATE renewal_requests SET state=? WHERE id=?').run(outcome, id);
-                audit('renewal', id, outcome);
-                return { settled: true, outcome };
-            });
-        },
-        addKnowledge(id, aliases, answer) {
-            if (!/^[a-z0-9_-]{1,40}$/.test(id) || !Array.isArray(aliases) || !aliases.length || aliases.length > 20 || aliases.some(value => typeof value !== 'string' || value.length > 100) || typeof answer !== 'string' || answer.length > 1200 || redactSupport(answer) !== answer) throw new Error('INVALID_KNOWLEDGE');
-            const serialized = JSON.stringify(aliases.map(normalize));
-            const previous = database.prepare('SELECT aliases,answer FROM knowledge WHERE id=?').get(id);
-            database.prepare('INSERT OR REPLACE INTO knowledge VALUES (?,?,?)').run(id, serialized, answer);
-            if (!previous || previous.aliases !== serialized || previous.answer !== answer) database.prepare('DELETE FROM private_cache').run();
-        },
-        knowledge(question) {
-            const query = normalize(question);
-            const values = database.prepare('SELECT * FROM knowledge LIMIT 100').all();
-            return values.filter(value => JSON.parse(value.aliases).some(alias => query === alias)).map(value => ({ id: value.id, text: value.answer })).slice(0, 4);
-        },
-        snippets() { return database.prepare('SELECT id,answer AS text FROM knowledge ORDER BY id LIMIT 4').all().map(item => ({ ...item, text: item.text.slice(0, 500) })); },
-        cached(id, question) { account(id); return database.prepare('SELECT answer FROM private_cache WHERE account=? AND question=? AND expires>?').get(id, hash(normalize(question)), now())?.answer; },
-        cache(id, question, answer) {
-            account(id);
-            if (normalize(question).split(' ').length < 4 || /(?:^|\s)(?:это|эта|этот|там|тут|да|нет|он|она|они)(?:\s|$)/.test(normalize(question))) return;
-            database.prepare('DELETE FROM private_cache WHERE expires<?').run(now());
-            database.prepare('INSERT OR REPLACE INTO private_cache VALUES (?,?,?,?)').run(id, hash(normalize(question)), redactSupport(answer), now() + 86400000);
-            database.prepare('DELETE FROM private_cache WHERE account=? AND question NOT IN (SELECT question FROM private_cache WHERE account=? ORDER BY expires DESC LIMIT 50)').run(id, id);
-        },
-        append(id, role, text) {
-            account(id);
-            if (!['user', 'assistant'].includes(role) || typeof text !== 'string' || !text.trim() || text.length > 1200) throw new Error('INVALID_MESSAGE');
-            database.prepare('DELETE FROM messages WHERE created<?').run(now() - 30 * 86400000);
-            const sanitized = redactSupport(text);
-            const inserted = database.prepare('INSERT INTO messages (account,role,text,created) VALUES (?,?,?,?)').run(id, role, sanitized, now());
-            database.prepare('DELETE FROM messages WHERE account=? AND id NOT IN (SELECT id FROM messages WHERE account=? ORDER BY id DESC LIMIT 100)').run(id, id);
-            return { id: Number(inserted.lastInsertRowid), text: sanitized };
-        },
-        history(id) { account(id); return database.prepare('SELECT role,text FROM messages WHERE account=? AND created>? ORDER BY id DESC LIMIT 6').all(id, now() - 30 * 86400000).reverse().map(value => ({ role: value.role, text: value.text.slice(0, 300) })); },
-        supportHistory(id) { account(id); return database.prepare('SELECT role,text FROM messages WHERE account=? AND created>? ORDER BY id DESC LIMIT 50').all(id, now() - 30 * 86400000).reverse().map(value => ({ role: value.role, text: value.text })); },
-        openSupport(id) { account(id); return database.prepare('SELECT id FROM handoffs WHERE account=? AND state=?').get(id, 'pending')?.id; },
-        handoff(id) {
-            account(id);
-            const existing = database.prepare('SELECT id FROM handoffs WHERE account=? AND state=?').get(id, 'pending');
-            if (existing) return existing.id;
-            const key = randomBytes(12).toString('hex'); database.prepare('INSERT INTO handoffs VALUES (?,?,?,?)').run(key, id, 'pending', now()); return key;
-        },
-        pendingSupport() { return database.prepare('SELECT handoff.id,account.panel_id FROM handoffs handoff JOIN accounts account ON account.id=handoff.account WHERE handoff.state=? ORDER BY handoff.created LIMIT 20').all('pending'); },
-        supportThread(id) {
-            const row = database.prepare('SELECT handoff.account,account.panel_id FROM handoffs handoff JOIN accounts account ON account.id=handoff.account WHERE handoff.id=? AND handoff.state=?').get(id, 'pending');
-            if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-            const latest = database.prepare('SELECT id,role,text,created FROM messages WHERE account=? ORDER BY id DESC LIMIT 1').get(row.account);
-            return { id, panelId: row.panel_id, version: hash(row.account + ':' + JSON.stringify(latest ?? null)).slice(0, 24), history: api.history(row.account), media: database.prepare('SELECT id,text FROM media_reviews WHERE account=? AND state=? ORDER BY created LIMIT 5').all(row.account, 'pending') };
-        },
-        supportMessage(id, key, text) {
-            if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id) || typeof key !== 'string' || !/^[a-f0-9]{32}$/.test(key) || typeof text !== 'string' || !text.trim() || text.length > 500) throw new Error('INVALID_MESSAGE');
-            return transact(() => {
-                const digest = hash(text);
-                const previous = database.prepare('SELECT ticket,body_hash FROM support_receipts WHERE key=?').get(key);
-                if (previous) { if (previous.ticket !== id || previous.body_hash !== digest) throw new Error('INVALID_MESSAGE'); return { recorded: true, replayed: true }; }
-                const row = database.prepare('SELECT account FROM handoffs WHERE id=? AND state=?').get(id, 'pending');
-                if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-                const message = api.append(row.account, 'assistant', text);
-                customer.enqueue(row.account, message, 'reply:' + key);
-                database.prepare('INSERT INTO support_receipts VALUES (?,?,?,?)').run(key, id, digest, now());
-                return { recorded: true };
-            });
-        },
-        closeSupport(id, version) {
-            if (typeof id !== 'string' || !/^[a-f0-9]{24}$/.test(id) || typeof version !== 'string' || !/^[a-f0-9]{24}$/.test(version)) throw new Error('INVALID_MESSAGE');
-            return transact(() => {
-                if (api.supportThread(id).version !== version) throw new Error('SUPPORT_THREAD_CHANGED');
-                const result = database.prepare('UPDATE handoffs SET state=? WHERE id=? AND state=?').run('resolved', id, 'pending');
-                return { closed: result.changes === 1 };
-            });
-        },
-        replySupport(id, text) {
-            if (typeof text !== 'string' || !text.trim() || text.length > 1000) throw new Error('INVALID_MESSAGE');
-            return transact(() => {
-                const row = database.prepare('SELECT account FROM handoffs WHERE id=? AND state=?').get(id, 'pending');
-                if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-                const message = api.append(row.account, 'assistant', text);
-                customer.enqueue(row.account, message, 'legacy:' + id);
-                database.prepare('UPDATE handoffs SET state=? WHERE id=?').run('resolved', id);
-                return { recorded: true };
-            });
-        },
-        allowMedia(id) {
-            account(id);
-            if (!database.prepare('SELECT id FROM handoffs WHERE account=? AND state=?').get(id, 'pending')) throw new Error('MEDIA_CONTEXT_REQUIRED');
-            const key = 'media:' + hash(id);
-            const previous = database.prepare('SELECT until FROM attempts WHERE key=?').get(key)?.until;
-            if (previous && previous > now()) throw new Error('MEDIA_RATE_LIMIT');
-            const question = api.history(id).filter(item => item.role === 'user').at(-1)?.text;
-            if (!question) throw new Error('MEDIA_CONTEXT_REQUIRED');
-            database.prepare('INSERT OR REPLACE INTO attempts VALUES (?,1,?)').run(key, now() + 60000);
-            database.prepare('INSERT OR REPLACE INTO media_permissions VALUES (?,?,?)').run(id, question, now() + 300000);
-            return { allowed: true };
+            const row            return { allowed: true };
         },
         consumeMedia(id) {
             account(id);
@@ -294,7 +105,7 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
         },
         close: () => database.close(),
     };
-    customer = createCustomerStore({ database, transact, api, enabled: customerEnabled, now });
+    customer = createCustomerStore({ database, transact, api, enabled: customerEnabled, signupEnabled: customerSignupEnabled, now });
     return Object.assign(api, { customer });
 }
 

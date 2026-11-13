@@ -2,11 +2,15 @@ import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { redactSupport } from './store.mjs';
+import { verifyTelegramLaunch } from './telegram-auth.mjs';
 
-export function createPortal({ store, support, origin, panelRead, billingEnabled = false, plans = {}, analyzeMedia, maxMediaBytes = 5242880, guides, customerUsername }) {
+const sessionToken = request => request.headers.authorization !== undefined ? request.headers.authorization.match(/^Bearer ([a-f0-9]{64})$/)?.[1] : request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
+
+export function createPortal({ store, support, origin, panelRead, billingEnabled = false, plans = {}, analyzeMedia, maxMediaBytes = 5242880, guides, customerUsername, miniAppEnabled = false, verifyLaunch = verifyTelegramLaunch }) {
     const publicOrigin = new URL(origin);
     const local = publicOrigin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(publicOrigin.hostname);
     if ((!local && publicOrigin.protocol !== 'https:') || publicOrigin.pathname !== '/' || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error('INVALID_PORTAL_ORIGIN');
+    if (miniAppEnabled && (local || !store.customer.enabled || !customerUsername)) throw new Error('INVALID_MINI_APP_CONFIGURATION');
     const html = readFileSync(new URL('./portal.html', import.meta.url), 'utf8');
     const availablePlans = billingEnabled ? ['RUB', 'USDT'].flatMap(currency => {
         const plan = plans[currency];
@@ -19,14 +23,16 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
         try {
             if (request.method === 'GET' && request.url === '/health') { send(200, { ready: true }); return; }
             if (request.headers.host !== publicOrigin.host) throw new Error('REQUEST_REJECTED');
-            if (request.method === 'GET' && request.url === '/') {
+            const miniApp = miniAppEnabled && request.url?.split('?')[0] === '/miniapp';
+            if (request.method === 'GET' && (request.url === '/' || miniApp)) {
                 const nonce = randomBytes(18).toString('base64');
-                response.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
-                response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html.replaceAll('__NONCE__', nonce)); return;
+                if (miniApp) response.removeHeader('X-Frame-Options');
+                response.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors ${miniApp ? "'self' https://web.telegram.org https://*.telegram.org" : "'none'"}; form-action 'self'`);
+                response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html.replaceAll('__NONCE__', nonce).replace('__TELEGRAM_SCRIPT__', miniApp ? `<script src="https://telegram.org/js/telegram-web-app.js" nonce="${nonce}"></script>` : '')); return;
             }
             if (request.method === 'POST' && request.url === '/api/media') {
                 if (!analyzeMedia || mediaBusy || request.headers.origin !== publicOrigin.origin || !['image/png', 'image/jpeg', 'video/mp4'].includes(request.headers['content-type'])) throw new Error('MEDIA_REJECTED');
-                const token = request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
+                const token = sessionToken(request);
                 const session = store.session(token);
                 if (request.headers['x-csrf-token'] !== session.csrf) throw new Error('REQUEST_REJECTED');
                 const permission = store.consumeMedia(session.account);
@@ -55,9 +61,24 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
                 response.setHeader('Set-Cookie', `session=${session.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600${local ? '' : '; Secure'}`);
                 send(200, { csrf: session.csrf }); return;
             }
-            const token = request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
+            const setSession = session => {
+                response.setHeader('Set-Cookie', `session=${session.token}; HttpOnly; SameSite=${miniAppEnabled ? 'None' : 'Strict'}; Path=/; Max-Age=3600${local ? '' : '; Secure'}`);
+                send(200, { csrf: session.csrf, ...(miniAppEnabled && request.headers['x-portal-mini-app'] === '1' ? { sessionKey: session.token } : {}) });
+            };
+            if (request.method === 'POST' && request.url === '/api/telegram-login') {
+                if (!miniAppEnabled || Object.keys(body).join(',') !== 'initData') throw new Error('TELEGRAM_LOGIN_REJECTED');
+                const id = store.customer.botIdentity(customerUsername);
+                const existing = sessionToken(request);
+                setSession(store.customer.webLogin(verifyLaunch(body.initData, id), existing)); return;
+            }
+            const token = sessionToken(request);
             const session = store.session(token);
             if (request.method === 'POST' && request.headers['x-csrf-token'] !== session.csrf) throw new Error('REQUEST_REJECTED');
+            if (request.method === 'POST' && ['/api/email-credentials', '/api/email-connect'].includes(request.url)) {
+                if (Object.keys(body).sort().join(',') !== 'email,password') throw new Error('EMAIL_LINK_REJECTED');
+                const updated = request.url === '/api/email-credentials' ? store.attachEmail(session.account, body.email, body.password) : store.connectEmail(session.account, body.email, body.password, request.socket.remoteAddress);
+                setSession(updated); return;
+            }
             if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), renewals: store.renewals(session.account), history: store.supportHistory(session.account), plans: availablePlans, telegram: { ...store.customer.state(session.account), botUsername: customerUsername ?? null }, features: { media: !!analyzeMedia, billing: billingEnabled, panel: !!panelRead } }); return; }
             if (request.method === 'POST' && request.url === '/api/telegram-link') {
                 if (Object.keys(body).length || !customerUsername || !/^(?=.{5,32}$)[A-Za-z0-9_]+bot$/i.test(customerUsername)) throw new Error('CUSTOMER_DISABLED');
@@ -72,6 +93,7 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
             }
             if (request.method === 'GET' && request.url === '/api/subscription') {
                 if (!panelRead) throw new Error('PANEL_UNAVAILABLE');
+                if (!store.account(session.account).panelId) throw new Error('PANEL_UNAVAILABLE');
                 const value = await panelRead(store.account(session.account).panelId);
                 send(200, value); return;
             }
@@ -97,7 +119,7 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
             if (request.method === 'POST' && request.url === '/api/erase-history') { store.eraseHistory(session.account); send(200, { ok: true }); return; }
             send(404, { code: 'NOT_FOUND' });
         } catch (error) {
-            const code = ['LOGIN_FAILED', 'SESSION_EXPIRED', 'INVALID_PAYMENT', 'PAYMENT_PENDING', 'RENEWAL_PENDING', 'RENEWAL_PLAN_UNAVAILABLE', 'RENEWAL_PLAN_CHANGED', 'INSUFFICIENT_BALANCE', 'SUPPORT_RATE_LIMIT', 'INVALID_MESSAGE', 'PANEL_UNAVAILABLE', 'MEDIA_REJECTED', 'MEDIA_CONTEXT_REQUIRED', 'MEDIA_RATE_LIMIT', 'MEDIA_UNAVAILABLE', 'CUSTOMER_DISABLED', 'CUSTOMER_ALREADY_LINKED', 'CUSTOMER_RATE_LIMIT'].includes(error?.message) ? error.message : 'REQUEST_REJECTED';
+            const code = ['TELEGRAM_LOGIN_REJECTED', 'EMAIL_REQUIRED', 'EMAIL_LINK_REJECTED', 'EMAIL_IN_USE', 'ACCOUNT_MERGE_REQUIRES_ADMIN', 'CUSTOMER_LINK_REJECTED', 'CUSTOMER_NOT_LINKED', 'LOGIN_FAILED', 'SESSION_EXPIRED', 'INVALID_PAYMENT', 'PAYMENT_PENDING', 'RENEWAL_PENDING', 'RENEWAL_PLAN_UNAVAILABLE', 'RENEWAL_PLAN_CHANGED', 'INSUFFICIENT_BALANCE', 'SUPPORT_RATE_LIMIT', 'INVALID_MESSAGE', 'PANEL_UNAVAILABLE', 'MEDIA_REJECTED', 'MEDIA_CONTEXT_REQUIRED', 'MEDIA_RATE_LIMIT', 'MEDIA_UNAVAILABLE', 'CUSTOMER_DISABLED', 'CUSTOMER_ALREADY_LINKED', 'CUSTOMER_RATE_LIMIT'].includes(error?.message) ? error.message : 'REQUEST_REJECTED';
             send(['LOGIN_FAILED', 'SESSION_EXPIRED'].includes(code) ? 401 : 400, { code });
         }
     });

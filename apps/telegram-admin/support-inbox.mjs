@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 const ticketId = value => typeof value === 'string' && /^[a-f0-9]{24}$/.test(value);
+const label = value => value.panelId > 0 ? `пользователь #${value.panelId}` : `клиент Telegram · ${value.id.slice(0, 6)}`;
 const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const clipped = value => {
     let result = '';
@@ -14,16 +15,16 @@ export function createSupportInbox({ actorId, call, now = Date.now }) {
     const valid = value => value && now() >= value.at && now() - value.at < 1800000;
     const screen = (text, rows = [], context) => ({ text, reply_markup: { inline_keyboard: [...rows, [{ text: '⬅ Обращения', callback_data: 'business_support' }]] }, ...(context ? { supportContext: context } : {}) });
     const controls = id => [[{ text: '🔄 Обновить диалог', callback_data: `bh:${id}` }, { text: '⏸ Выйти из переписки', callback_data: `bsl:${id}` }]];
-    const waiting = (target, text) => screen((Number.isSafeInteger(target.panelId) ? `<b>💬 Поддержка · пользователь #${target.panelId}</b>\n\n` : '') + text, controls(target.id), target.id);
+    const waiting = (target, text) => screen((Number.isSafeInteger(target.panelId) ? `<b>💬 Поддержка · ${label(target)}</b>\n\n` : '') + text, controls(target.id), target.id);
     function card(thread, notice = '', active = true) {
-        if (!ticketId(thread?.id) || !Number.isSafeInteger(thread.panelId) || thread.panelId <= 0 || !ticketId(thread.version) || !Array.isArray(thread.history)) throw new Error('SUPPORT_UNAVAILABLE');
+        if (!ticketId(thread?.id) || !Number.isSafeInteger(thread.panelId) || thread.panelId < 0 || !ticketId(thread.version) || !Array.isArray(thread.history)) throw new Error('SUPPORT_UNAVAILABLE');
         if (active) composing = { id: thread.id, panelId: thread.panelId, at: now(), blocked: false };
         while (cards.size >= 20) cards.delete(cards.keys().next().value);
         const key = randomBytes(9).toString('base64url');
         cards.set(key, { id: thread.id, panelId: thread.panelId, version: thread.version, at: now() });
         const history = thread.history.slice(-6).map(item => `<b>${item.role === 'user' ? 'Клиент' : 'Поддержка'}:</b> ${clipped(item.text)}`).join('\n\n');
-        const mode = active ? `<b>✍️ Сейчас вы отвечаете пользователю #${thread.panelId}.</b>\nПишите обычные сообщения подряд. Режим сохраняется до выхода, переключения или 30 минут бездействия.` : 'Режим переписки выключен. Чтобы продолжить, откройте диалог снова.';
-        return screen(`<b>💬 Поддержка · пользователь #${thread.panelId}</b>\n\n${history}\n\n${notice ? notice + '\n\n' : ''}${mode}`, [...(active ? controls(thread.id) : [[{ text: '✍️ Продолжить переписку', callback_data: `bsr:${key}` }, { text: '🔄 Открыть диалог', callback_data: `bh:${thread.id}` }]]), [{ text: '✅ Завершить диалог', callback_data: `bsc:${key}` }], ...(thread.media ?? []).filter(item => ticketId(item.id)).slice(0, 5).map(item => [{ text: '📷 Текст вложения', callback_data: `bm:${item.id}` }])], thread.id);
+        const mode = active ? `<b>✍️ Сейчас вы отвечаете ${thread.panelId > 0 ? `пользователю #${thread.panelId}` : `клиенту Telegram · ${thread.id.slice(0, 6)}`}.</b>\nПишите обычные сообщения подряд. Режим сохраняется до выхода, переключения или 30 минут бездействия.` : 'Режим переписки выключен. Чтобы продолжить, откройте диалог снова.';
+        return screen(`<b>💬 Поддержка · ${label(thread)}</b>\n\n${history}\n\n${notice ? notice + '\n\n' : ''}${mode}`, [...(active ? controls(thread.id) : [[{ text: '✍️ Продолжить переписку', callback_data: `bsr:${key}` }, { text: '🔄 Открыть диалог', callback_data: `bh:${thread.id}` }]]), [{ text: '✅ Завершить диалог', callback_data: `bsc:${key}` }], ...(thread.media ?? []).filter(item => ticketId(item.id)).slice(0, 5).map(item => [{ text: '📷 Текст вложения', callback_data: `bm:${item.id}` }])], thread.id);
     }
     async function loadCard(id, notice = '', active = true, panelId) {
         const thread = await call('/support/' + id);
@@ -83,7 +84,7 @@ export function createSupportInbox({ actorId, call, now = Date.now }) {
                         if (result?.closed !== true) throw new Error('SUPPORT_UNAVAILABLE');
                         for (const [key, item] of cards) if (item.id === target.id) cards.delete(key);
                         for (const [key, item] of bindings) if (item.id === target.id) bindings.delete(key);
-                        return screen(`✅ Диалог пользователя #${target.panelId} завершён. Новое обращение клиента снова появится в очереди.`, [], target.id);
+                        return screen(`✅ Диалог ${target.panelId > 0 ? `пользователя #${target.panelId}` : `клиента Telegram · ${target.id.slice(0, 6)}`} завершён. Новое обращение клиента снова появится в очереди.`, [], target.id);
                     }
                     const thread = await call('/support/' + target.id);
                     if (thread?.id !== target.id || thread.panelId !== target.panelId) throw new Error('SUPPORT_UNAVAILABLE');

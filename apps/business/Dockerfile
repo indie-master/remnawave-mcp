@@ -19,6 +19,7 @@ COPY apps/business/config.mjs ./apps/business/
 COPY apps/business/billing-admin.mjs ./apps/business/
 COPY apps/business/support-admin.mjs ./apps/business/
 COPY apps/business/customer-store.mjs apps/business/customer-api.mjs ./apps/business/
+COPY apps/business/identity.mjs apps/business/telegram-auth.mjs ./apps/business/
 COPY apps/business/store.mjs apps/business/portal.mjs apps/business/portal.html apps/business/faq.json apps/business/start.mjs ./apps/business/
 COPY apps/business/account-cli.mjs ./apps/business/
 COPY apps/business/reference-search.mjs ./apps/business/
