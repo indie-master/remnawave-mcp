@@ -18,11 +18,12 @@ COPY apps/telegram-admin/admin-identity.mjs apps/telegram-admin/admin-squads.mjs
 COPY apps/business/config.mjs ./apps/business/
 COPY apps/business/billing-admin.mjs ./apps/business/
 COPY apps/business/support-admin.mjs ./apps/business/
+COPY apps/business/customer-store.mjs apps/business/customer-api.mjs ./apps/business/
 COPY apps/business/store.mjs apps/business/portal.mjs apps/business/portal.html apps/business/faq.json apps/business/start.mjs ./apps/business/
 COPY apps/business/account-cli.mjs ./apps/business/
 COPY apps/business/reference-search.mjs ./apps/business/
 COPY apps/business/media-client.mjs ./apps/business/
 COPY apps/business/guides.mjs ./apps/business/
-RUN chmod -R a+rX /app && mkdir /state /business-bridge /media-bridge && chown node:node /state /business-bridge /media-bridge
+RUN chmod -R a+rX /app && mkdir /state /business-bridge /media-bridge /customer-bridge && chown node:node /state /business-bridge /media-bridge /customer-bridge
 USER node
 ENTRYPOINT ["node", "/app/apps/business/start.mjs"]

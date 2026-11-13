@@ -75,3 +75,24 @@ test('financial state transfer preserves the reserve, review deadline and audit 
         assert.throws(() => restored.reconcileRenewal(renewal.id, { ...item, outcome: 'refunded', note: 'Панель и журналы проверены вручную' }));
     } finally { original?.close(); restored?.close(); state.close(); }
 });
+
+test('customer migration preserves receiver offsets and bindings, revokes link codes and never replays an in-flight notification', () => {
+    const state = fixture(); let original; let restored;
+    try {
+        state.sources.customer = join(state.directory, 'old-customer'); state.targets.customer = join(state.directory, 'new-customer'); mkdirSync(state.sources.customer); mkdirSync(state.targets.customer);
+        writeFileSync(join(state.sources.customer, 'offset.json'), '{"offset":987}'); writeFileSync(join(state.sources.customer, 'receiver-safety.json'), '{"mode":"active","failures":0,"lastFailure":0}');
+        original = createBusinessStore({ filename: join(state.sources.business, 'business.sqlite'), customerEnabled: true });
+        const account = original.provision('customer@example.invalid', 'synthetic-password-only', 48).id;
+        original.customer.link(111111111, original.customer.issue(account).code);
+        const other = original.provision('other@example.invalid', 'synthetic-password-only', 49).id; const code = original.customer.issue(other).code;
+        const ticket = original.handoff(account); original.supportMessage(ticket, 'a'.repeat(32), 'Ответ перед переносом'); original.customer.claim();
+        original.close(); original = undefined;
+        exportState({ sources: state.sources, destination: state.destination, revision });
+        restoreState({ snapshot: state.destination, targets: state.targets, revision });
+        restored = createBusinessStore({ filename: join(state.targets.business, 'business.sqlite'), customerEnabled: true });
+        assert.equal(readFileSync(join(state.targets.customer, 'offset.json'), 'utf8'), '{"offset":987}');
+        assert.equal(restored.customer.account(111111111).panelId, 48);
+        assert.throws(() => restored.customer.link(222222222, code));
+        assert.equal(restored.customer.claim().delivery, null);
+    } finally { original?.close(); restored?.close(); state.close(); }
+});

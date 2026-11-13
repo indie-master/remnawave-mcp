@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { redactSupport } from './store.mjs';
 
-export function createPortal({ store, support, origin, panelRead, billingEnabled = false, plans = {}, analyzeMedia, maxMediaBytes = 5242880, guides }) {
+export function createPortal({ store, support, origin, panelRead, billingEnabled = false, plans = {}, analyzeMedia, maxMediaBytes = 5242880, guides, customerUsername }) {
     const publicOrigin = new URL(origin);
     const local = publicOrigin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(publicOrigin.hostname);
     if ((!local && publicOrigin.protocol !== 'https:') || publicOrigin.pathname !== '/' || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error('INVALID_PORTAL_ORIGIN');
@@ -58,8 +58,14 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
             const token = request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
             const session = store.session(token);
             if (request.method === 'POST' && request.headers['x-csrf-token'] !== session.csrf) throw new Error('REQUEST_REJECTED');
-            if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), renewals: store.renewals(session.account), history: store.supportHistory(session.account), plans: availablePlans, features: { media: !!analyzeMedia, billing: billingEnabled, panel: !!panelRead } }); return; }
-            if (request.method === 'GET' && request.url === '/api/support') { send(200, { history: store.supportHistory(session.account), state: store.openSupport(session.account) ? 'open' : 'closed' }); return; }
+            if (request.method === 'GET' && request.url === '/api/account') { send(200, { ...store.account(session.account), csrf: session.csrf, payments: store.payments(session.account), renewals: store.renewals(session.account), history: store.supportHistory(session.account), plans: availablePlans, telegram: { ...store.customer.state(session.account), botUsername: customerUsername ?? null }, features: { media: !!analyzeMedia, billing: billingEnabled, panel: !!panelRead } }); return; }
+            if (request.method === 'POST' && request.url === '/api/telegram-link') {
+                if (Object.keys(body).length || !customerUsername || !/^(?=.{5,32}$)[A-Za-z0-9_]+bot$/i.test(customerUsername)) throw new Error('CUSTOMER_DISABLED');
+                const link = store.customer.issue(session.account);
+                send(200, { url: `https://t.me/${customerUsername}?start=${link.code}`, expiresAt: link.expiresAt }); return;
+            }
+            if (request.method === 'POST' && request.url === '/api/telegram-unlink') { if (Object.keys(body).length) throw new Error('REQUEST_REJECTED'); send(200, store.customer.unlink(session.account)); return; }
+            if (request.method === 'GET' && request.url === '/api/support') { send(200, { history: store.supportHistory(session.account), state: store.openSupport(session.account) ? 'open' : 'closed', telegram: store.customer.state(session.account) }); return; }
             if (request.method === 'GET' && request.url === '/api/guides') { send(200, guides?.list() ?? []); return; }
             if (request.method === 'GET' && /^\/api\/guides\/[a-z0-9_-]{1,40}$/.test(request.url) && guides) {
                 const image = guides.image(request.url.split('/').at(-1)); response.writeHead(200, { 'Content-Type': image.type }).end(image.bytes); return;
@@ -91,7 +97,7 @@ export function createPortal({ store, support, origin, panelRead, billingEnabled
             if (request.method === 'POST' && request.url === '/api/erase-history') { store.eraseHistory(session.account); send(200, { ok: true }); return; }
             send(404, { code: 'NOT_FOUND' });
         } catch (error) {
-            const code = ['LOGIN_FAILED', 'SESSION_EXPIRED', 'INVALID_PAYMENT', 'PAYMENT_PENDING', 'RENEWAL_PENDING', 'RENEWAL_PLAN_UNAVAILABLE', 'RENEWAL_PLAN_CHANGED', 'INSUFFICIENT_BALANCE', 'SUPPORT_RATE_LIMIT', 'INVALID_MESSAGE', 'PANEL_UNAVAILABLE', 'MEDIA_REJECTED', 'MEDIA_CONTEXT_REQUIRED', 'MEDIA_RATE_LIMIT', 'MEDIA_UNAVAILABLE'].includes(error?.message) ? error.message : 'REQUEST_REJECTED';
+            const code = ['LOGIN_FAILED', 'SESSION_EXPIRED', 'INVALID_PAYMENT', 'PAYMENT_PENDING', 'RENEWAL_PENDING', 'RENEWAL_PLAN_UNAVAILABLE', 'RENEWAL_PLAN_CHANGED', 'INSUFFICIENT_BALANCE', 'SUPPORT_RATE_LIMIT', 'INVALID_MESSAGE', 'PANEL_UNAVAILABLE', 'MEDIA_REJECTED', 'MEDIA_CONTEXT_REQUIRED', 'MEDIA_RATE_LIMIT', 'MEDIA_UNAVAILABLE', 'CUSTOMER_DISABLED', 'CUSTOMER_ALREADY_LINKED', 'CUSTOMER_RATE_LIMIT'].includes(error?.message) ? error.message : 'REQUEST_REJECTED';
             send(['LOGIN_FAILED', 'SESSION_EXPIRED'].includes(code) ? 401 : 400, { code });
         }
     });

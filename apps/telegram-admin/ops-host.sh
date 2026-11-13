@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 fail() { printf '%s\n' "$1" >&2; exit 2; }
-docker_local() { env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH docker --host unix:///var/run/docker.sock "$@"; }
+docker_local() { env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u BOT_USERNAME docker --host unix:///var/run/docker.sock "$@"; }
 help_text() {
     printf '%s\n' 'botctl: только этот проект, только локальный Docker.' \
         '  help | status | logs [bot|ai]' \
@@ -19,6 +19,7 @@ help_text() {
         '  backup                  остановить проект и сохранить состояние без токенов/auth' \
         '  restore BACKUP_ID       восстановить доверенный снимок только в пустое состояние' \
         '  business settings|check|build|start|stop|status|logs|account отдельный кабинет' \
+        '  customer settings|token|check|build|start|stop|status|logs отдельный клиентский бот' \
         '  voice build|start|stop|status отдельное локальное распознавание' \
         '  media build|start|stop|status отдельный локальный OCR' \
         '  apply-all               применить ядро и выбранные env-модули' \
@@ -154,17 +155,17 @@ edit_configuration() {
 replace_token() {
     local kind=$1 target
     [[ -r /dev/tty && -w /dev/tty && -d "$APP/secrets" && ! -L "$APP/secrets" ]] || fail 'Нужны SSH-терминал и существующая папка secrets.'
-    case "$kind" in panel) target="$APP/secrets/panel-api-token.txt" ;; telegram) target="$APP/secrets/telegram-bot-token.txt" ;; write) target="$APP/secrets/panel-write-token.txt" ;; search) target="$REPO/apps/business/secrets/search-api-token.txt"; [[ ! -L "$REPO/apps/business/secrets" ]] || fail 'Недопустимая папка secrets.'; mkdir -p -- "$REPO/apps/business/secrets"; chmod 0700 "$REPO/apps/business/secrets" ;; *) fail 'Укажите token panel, telegram, write или search.' ;; esac
-    [[ ( "$kind" =~ ^(write|search)$ && ! -e "$target" && ! -L "$target" ) || ( -f "$target" && ! -L "$target" && $(stat -c %h "$target") == 1 ) ]] || fail 'Нужен обычный файл токена, без ссылок.'
+    case "$kind" in panel) target="$APP/secrets/panel-api-token.txt" ;; telegram) target="$APP/secrets/telegram-bot-token.txt" ;; write) target="$APP/secrets/panel-write-token.txt" ;; customer) target="$REPO/apps/customer-bot/secrets/telegram-bot-token.txt"; [[ ! -L "$REPO/apps/customer-bot/secrets" ]] || fail 'Недопустимая папка secrets.'; mkdir -p -- "$REPO/apps/customer-bot/secrets"; chmod 0700 "$REPO/apps/customer-bot/secrets" ;; search) target="$REPO/apps/business/secrets/search-api-token.txt"; [[ ! -L "$REPO/apps/business/secrets" ]] || fail 'Недопустимая папка secrets.'; mkdir -p -- "$REPO/apps/business/secrets"; chmod 0700 "$REPO/apps/business/secrets" ;; *) fail 'Укажите token panel, telegram, write или search.' ;; esac
+    [[ ( "$kind" =~ ^(write|search|customer)$ && ! -e "$target" && ! -L "$target" ) || ( -f "$target" && ! -L "$target" && $(stat -c %h "$target") == 1 ) ]] || fail 'Нужен обычный файл токена, без ссылок.'
     read -r -s -p 'Новый токен (ввод скрыт): ' NEW_TOKEN < /dev/tty; printf '\n' > /dev/tty
     read -r -s -p 'Повторите новый токен: ' CONFIRM_TOKEN < /dev/tty; printf '\n' > /dev/tty
     [[ -n "$NEW_TOKEN" && "$NEW_TOKEN" == "$CONFIRM_TOKEN" && ${#NEW_TOKEN} -le 4096 && "$NEW_TOKEN" != *[[:space:]]* ]] || fail 'Токены не совпали или формат неверен. Старый файл не менялся.'
-    [[ "$kind" != telegram || "$NEW_TOKEN" =~ ^[1-9][0-9]{4,19}:[A-Za-z0-9_-]{30,128}$ ]] || fail 'Неверный формат Telegram-токена. Старый файл не менялся.'
+    [[ ! "$kind" =~ ^(telegram|customer)$ || "$NEW_TOKEN" =~ ^[1-9][0-9]{4,19}:[A-Za-z0-9_-]{30,128}$ ]] || fail 'Неверный формат Telegram-токена. Старый файл не менялся.'
     SECRET_DRAFT=$(mktemp "${target%/*}/.new-token.XXXXXXXX")
     printf '%s\n' "$NEW_TOKEN" > "$SECRET_DRAFT"; unset NEW_TOKEN CONFIRM_TOKEN
     chown 1000:1000 "$SECRET_DRAFT"; chmod 0400 "$SECRET_DRAFT"
     mv -- "$SECRET_DRAFT" "$target"; SECRET_DRAFT=''
-    printf 'Новый токен сохранён. Старый не читался и не копировался. Применение bind-mount: botctl apply\n'
+    if [[ "$kind" == customer ]]; then printf 'Новый клиентский токен сохранён. Применение: botctl customer start\n'; else printf 'Новый токен сохранён. Старый не читался и не копировался. Применение bind-mount: botctl apply\n'; fi
 }
 
 read_record() {
@@ -245,7 +246,7 @@ prepare_rollback() {
     check_file controls "$OPS/settings.env" "$previous_image" || fail 'Настройки несовместимы с предыдущим образом. Исходники и контейнеры не менялись.'
     [[ ! -e "$APP/.env.extensions" ]] || check_file extensions "$APP/.env.extensions" "$previous_image" || fail 'Для отката удалите новые ключи и поля из extensions, затем повторите rollback. Исходники и контейнеры не менялись.'
     retag_record || fail 'Образы отката недоступны. Контейнеры и исходники не менялись.'
-    optional_service business stop; optional_service voice stop; optional_service media stop
+    optional_service customer stop; optional_service business stop; optional_service voice stop; optional_service media stop
     git -C "$REPO" checkout --detach "$REVISION" >/dev/null 2>&1
     printf '%s\n' "$REVISION" > "$OPS/pending"
     printf 'Предыдущие исходники и образы подготовлены. Текущее состояние/настройки не откатывались. Следующий шаг: botctl apply\n'
@@ -282,6 +283,7 @@ optional_service() {
     local -a arguments
     if [[ "$kind" == voice ]]; then directory=$APP; project=panel-admin-voice; service=voice; arguments=(-p "$project" --project-directory "$directory" -f "$APP/compose.voice.yaml");
     elif [[ "$kind" == media ]]; then directory="$REPO/apps/business"; project=panel-admin-media; service=media; arguments=(-p "$project" --project-directory "$directory" -f "$directory/compose.media.yaml");
+    elif [[ "$kind" == customer ]]; then directory="$REPO/apps/customer-bot"; project=panel-customer-bot; service=customer; arguments=(-p "$project" --project-directory "$directory" --env-file "$APP/.env" --env-file "$directory/.env" -f "$directory/compose.yaml");
     else directory="$REPO/apps/business"; project=panel-admin-business; service=portal; arguments=(-p "$project" --project-directory "$directory" --env-file "$directory/.env" -f "$directory/compose.yaml"); fi
     ids=$(docker_local ps -aq --filter "label=com.docker.compose.project=$project")
     local count=0
@@ -291,18 +293,19 @@ optional_service() {
         [[ "$details" == "$service|$directory" ]] || fail 'Дополнительный проект принадлежит другой папке.'
     done
     if [[ "$action" == status ]]; then docker_local ps -a --filter "label=com.docker.compose.project=$project" --format 'table {{.Names}}\t{{.Status}}'; return; fi
-    if [[ "$kind" == business && "$action" == logs ]]; then
-        [[ -n "$ids" ]] || fail 'Кабинет ещё не создан.'
+    if [[ ( "$kind" == business || "$kind" == customer ) && "$action" == logs ]]; then
+        [[ -n "$ids" ]] || fail 'Дополнительный сервис ещё не создан.'
         docker_local logs --tail 40 "$ids"; return
     fi
     if [[ "$action" == stop ]]; then for identifier in $ids; do docker_local stop --time 45 "$identifier" >/dev/null; done; return; fi
-    if [[ "$kind" == business && "$action" == settings ]]; then
+    if [[ "$kind" == customer && "$action" == token ]]; then replace_token customer; return; fi
+    if [[ ( "$kind" == business || "$kind" == customer ) && "$action" == settings ]]; then
         local business_draft
         DRAFT=$(mktemp "$OPS/business.XXXXXXXX")
         if [[ -e "$directory/.env" ]]; then private_file "$directory/.env"; cp -- "$directory/.env" "$DRAFT"; else cp -- "$directory/.env.example" "$DRAFT"; fi
         nano -- "$DRAFT" < /dev/tty > /dev/tty 2> /dev/tty
         business_draft=$DRAFT
-        if check_file business "$business_draft"; then DRAFT=$business_draft; else rm -f -- "$business_draft"; return 1; fi
+        if check_file "$kind" "$business_draft"; then DRAFT=$business_draft; else rm -f -- "$business_draft"; return 1; fi
         chown 0:0 "$DRAFT"; chmod 0600 "$DRAFT"; mv -- "$DRAFT" "$directory/.env"; DRAFT=''; return
     fi
     if [[ "$kind" == business ]]; then
@@ -310,16 +313,31 @@ optional_service() {
         [[ $(sed -n '/^SUPPORT_AI_ENABLED=true$/p' "$directory/.env") != SUPPORT_AI_ENABLED=true ]] || arguments+=(-f "$directory/compose.ai.yaml")
         [[ $(sed -n '/^PORTAL_PANEL_READ_ENABLED=true$/p' "$directory/.env") != PORTAL_PANEL_READ_ENABLED=true ]] || arguments+=(-f "$directory/compose.panel.yaml")
         [[ $(sed -n '/^SEARCH_ENABLED=true$/p' "$directory/.env") != SEARCH_ENABLED=true ]] || arguments+=(-f "$directory/compose.search.yaml")
+        [[ $(sed -n '/^CUSTOMER_BOT_ENABLED=true$/p' "$directory/.env") != CUSTOMER_BOT_ENABLED=true ]] || arguments+=(-f "$directory/compose.customer.yaml")
+    fi
+    if [[ "$kind" == customer ]]; then
+        check_file customer "$directory/.env" || return
+        check_file base "$APP/.env" || return
+        local admin_name customer_name
+        admin_name=$(sed -n 's/^BOT_USERNAME=//p' "$APP/.env"); customer_name=$(sed -n 's/^CUSTOMER_BOT_USERNAME=//p' "$directory/.env")
+        [[ "${admin_name,,}" != "${customer_name,,}" ]] || fail 'Клиентский и административный боты должны быть разными.'
+        if [[ "$action" == start ]]; then
+            check_file business "$REPO/apps/business/.env" || return
+            local backend_name
+            backend_name=$(sed -n 's/^CUSTOMER_BOT_USERNAME=//p' "$REPO/apps/business/.env")
+            [[ $(sed -n '/^PORTAL_ENABLED=true$/p' "$REPO/apps/business/.env") == PORTAL_ENABLED=true && $(sed -n '/^CUSTOMER_BOT_ENABLED=true$/p' "$REPO/apps/business/.env") == CUSTOMER_BOT_ENABLED=true && "${backend_name,,}" == "${customer_name,,}" ]] || fail 'Сначала согласуйте включение и имя клиентского бота в business settings.'
+        fi
     fi
     case "$action" in
         check) docker_local compose "${arguments[@]}" config --quiet; printf 'Настройки кабинета проверены. Контейнеры не менялись.\n' ;;
         build) docker_local compose "${arguments[@]}" build ;;
         start)
             docker_local compose "${arguments[@]}" config --quiet
-            if [[ "$kind" == business ]]; then
-                [[ $(sed -n '/^PORTAL_ENABLED=true$/p' "$directory/.env") == PORTAL_ENABLED=true ]] || fail 'Сначала включите PORTAL_ENABLED через business settings.'
+            if [[ "$kind" == business || "$kind" == customer ]]; then
+                if [[ "$kind" == business ]]; then [[ $(sed -n '/^PORTAL_ENABLED=true$/p' "$directory/.env") == PORTAL_ENABLED=true ]] || fail 'Сначала включите PORTAL_ENABLED через business settings.';
+                else [[ $(sed -n '/^CUSTOMER_BOT_ENABLED=true$/p' "$directory/.env") == CUSTOMER_BOT_ENABLED=true ]] || fail 'Сначала включите CUSTOMER_BOT_ENABLED через customer settings.'; fi
                 docker_local compose "${arguments[@]}" up -d --no-build --no-deps --wait --wait-timeout 60 "$service" || return
-                printf 'Кабинет healthy. Доступ с VPS: только 127.0.0.1:8787.\n'
+                if [[ "$kind" == business ]]; then printf 'Кабинет healthy. Доступ с VPS: только 127.0.0.1:8787.\n'; else printf 'Клиентский бот healthy.\n'; fi
             else docker_local compose "${arguments[@]}" up -d --no-build --no-deps "$service"; fi
             ;;
         account) [[ "$kind" == business && -n "$ids" ]] || fail 'Нужен запущенный кабинет.'; docker_local exec -it "$ids" node /app/apps/business/account-cli.mjs ;;
@@ -339,11 +357,11 @@ transfer_state() {
     fi
     local missing_kinds=''
     local -a mounts=()
-    for identifier in bot ai business; do
-        case "$identifier" in bot) volume=panel-admin-bot_bot-state ;; ai) volume=panel-admin-bot_ai-state ;; business) volume=panel-admin-business_business-state ;; esac
+    for identifier in bot ai business customer; do
+        case "$identifier" in bot) volume=panel-admin-bot_bot-state ;; ai) volume=panel-admin-bot_ai-state ;; business) volume=panel-admin-business_business-state ;; customer) volume=panel-customer-bot_customer-state ;; esac
         if docker_local volume inspect "$volume" >/dev/null 2>&1; then
             label=$(docker_local volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$volume")
-            [[ "$label" == panel-admin-bot || ( "$identifier" == business && "$label" == panel-admin-business ) ]] || fail 'Том принадлежит другому проекту.'
+            [[ ( "$identifier" =~ ^(bot|ai)$ && "$label" == panel-admin-bot ) || ( "$identifier" == business && "$label" == panel-admin-business ) || ( "$identifier" == customer && "$label" == panel-customer-bot ) ]] || fail 'Том принадлежит другому проекту.'
             mounts+=(--mount "type=volume,src=$volume,dst=/source/$identifier$([[ "$mode" == restore ]] || printf ',readonly')")
         else
             missing_kinds+="$identifier,"
@@ -355,6 +373,7 @@ transfer_state() {
         details=$(docker_local inspect --format '{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$business_id")
         [[ "$details" == "portal|$REPO/apps/business" ]] || fail 'Бизнес-проект принадлежит другой папке.'
     done
+    optional_service customer stop
     [[ -z "$BOT_ID" ]] || docker_local stop --time 45 "$BOT_ID" >/dev/null
     [[ -z "$AI_ID" ]] || docker_local stop --time 15 "$AI_ID" >/dev/null
     for business_id in $business_ids; do docker_local stop --time 45 "$business_id" >/dev/null; done
@@ -374,7 +393,13 @@ transfer_state() {
 apply_all() {
     check_configuration || return
     [[ ! -e "$REPO/apps/business/.env" ]] || check_file business "$REPO/apps/business/.env" || return
-    optional_service business stop; optional_service voice stop; optional_service media stop
+    if [[ -f "$REPO/apps/customer-bot/.env" ]]; then
+        check_file customer "$REPO/apps/customer-bot/.env" || return
+        if [[ $(sed -n '/^CUSTOMER_BOT_ENABLED=true$/p' "$REPO/apps/customer-bot/.env") == CUSTOMER_BOT_ENABLED=true ]]; then
+            [[ -f "$REPO/apps/business/.env" && $(sed -n '/^PORTAL_ENABLED=true$/p' "$REPO/apps/business/.env") == PORTAL_ENABLED=true && $(sed -n '/^CUSTOMER_BOT_ENABLED=true$/p' "$REPO/apps/business/.env") == CUSTOMER_BOT_ENABLED=true ]] || fail 'Для клиентского бота сначала включите кабинет и клиентский модуль в business settings.'
+        fi
+    fi
+    optional_service customer stop; optional_service business stop; optional_service voice stop; optional_service media stop
     apply_configuration
     if [[ -f "$APP/.env.extensions" && $(sed -n '/^VOICE_ENABLED=true$/p' "$APP/.env.extensions") == VOICE_ENABLED=true ]]; then optional_service voice build; optional_service voice start; fi
     if [[ -f "$REPO/apps/business/.env" && $(sed -n '/^PORTAL_ENABLED=true$/p' "$REPO/apps/business/.env") == PORTAL_ENABLED=true ]]; then
@@ -385,7 +410,8 @@ apply_all() {
         fi
         optional_service business start
     fi
-    optional_service voice status; optional_service media status; optional_service business status
+    if [[ -f "$REPO/apps/customer-bot/.env" && $(sed -n '/^CUSTOMER_BOT_ENABLED=true$/p' "$REPO/apps/customer-bot/.env") == CUSTOMER_BOT_ENABLED=true ]]; then optional_service customer build; optional_service customer start; fi
+    optional_service voice status; optional_service media status; optional_service business status; optional_service customer status
     printf 'Выбранные модули применены. Проверьте их health и прикладные сценарии; защитные паузы не снимались.\n'
 }
 
@@ -393,7 +419,7 @@ main() {
     APP=$1; shift
     local command=${1:-help}; shift || true
     [[ "$command" != help || $# != 0 ]] || { help_text; return; }
-    case "$command" in status|adopt|build|check|start|apply|apply-all|stop|stop-all|config|settings|extensions|backup|rollback) [[ $# == 0 ]] || fail 'Лишние аргументы.' ;; business) [[ $# == 1 && "$1" =~ ^(settings|check|build|start|stop|status|logs|account)$ ]] || fail 'Некорректная операция business.' ;; voice|media) [[ $# == 1 && "$1" =~ ^(build|start|stop|status)$ ]] || fail 'Некорректная операция worker.' ;; restore) [[ $# == 1 && "$1" =~ ^backup\.[A-Za-z0-9]{8}$ ]] || fail 'Используйте restore BACKUP_ID.' ;; logs) [[ $# -le 1 && "${1:-bot}" =~ ^(bot|ai)$ ]] || fail 'Используйте logs bot или logs ai.' ;; token) [[ $# == 1 && "$1" =~ ^(panel|telegram|write|search)$ ]] || fail 'Используйте token panel, telegram, write или search.' ;; update) [[ $# == 1 ]] || fail 'Используйте update FULL_SHA.' ;; init) ;; *) fail 'Неизвестная команда. Используйте help.' ;; esac
+    case "$command" in status|adopt|build|check|start|apply|apply-all|stop|stop-all|config|settings|extensions|backup|rollback) [[ $# == 0 ]] || fail 'Лишние аргументы.' ;; customer) [[ $# == 1 && "$1" =~ ^(settings|token|check|build|start|stop|status|logs)$ ]] || fail 'Некорректная операция customer.' ;; business) [[ $# == 1 && "$1" =~ ^(settings|check|build|start|stop|status|logs|account)$ ]] || fail 'Некорректная операция business.' ;; voice|media) [[ $# == 1 && "$1" =~ ^(build|start|stop|status)$ ]] || fail 'Некорректная операция worker.' ;; restore) [[ $# == 1 && "$1" =~ ^backup\.[A-Za-z0-9]{8}$ ]] || fail 'Используйте restore BACKUP_ID.' ;; logs) [[ $# -le 1 && "${1:-bot}" =~ ^(bot|ai)$ ]] || fail 'Используйте logs bot или logs ai.' ;; token) [[ $# == 1 && "$1" =~ ^(panel|telegram|write|search)$ ]] || fail 'Используйте token panel, telegram, write или search.' ;; update) [[ $# == 1 ]] || fail 'Используйте update FULL_SHA.' ;; init) ;; *) fail 'Неизвестная команда. Используйте help.' ;; esac
     [[ "$EUID" == 0 && "$APP" != *[,\|$'\n']* ]] || fail 'Нужен root SSH-терминал и обычный путь проекта.'
     [[ $(stat -c %u "$APP") == 0 && ! -L "$APP/ops-host.sh" && $(stat -c %u "$APP/ops-host.sh") == 0 ]] || fail 'Помощник должен находиться в checkout, принадлежащем root.'
     OPS="$APP/.ops"; REPO=$(cd -- "$APP/../.." && pwd -P)
@@ -408,9 +434,9 @@ main() {
     exec 9>>"$OPS/lock"; chmod 0600 "$OPS/lock"
     flock -n 9 || fail 'Другой botctl уже выполняется.'
     DRAFT=''; SECRET_DRAFT=''; trap cleanup EXIT
-    if [[ "$command" == business || "$command" == voice || "$command" == media ]]; then optional_service "$command" "$1"; return; fi
+    if [[ "$command" == business || "$command" == voice || "$command" == media || "$command" == customer ]]; then optional_service "$command" "$1"; return; fi
     if [[ "$command" == apply-all ]]; then load_settings; apply_all; return; fi
-    if [[ "$command" == stop-all ]]; then optional_service business stop; optional_service voice stop; optional_service media stop; [[ -z "$BOT_ID" ]] || docker_local stop --time 45 "$BOT_ID" >/dev/null; [[ -z "$AI_ID" ]] || docker_local stop --time 15 "$AI_ID" >/dev/null; return; fi
+    if [[ "$command" == stop-all ]]; then optional_service customer stop; optional_service business stop; optional_service voice stop; optional_service media stop; [[ -z "$BOT_ID" ]] || docker_local stop --time 45 "$BOT_ID" >/dev/null; [[ -z "$AI_ID" ]] || docker_local stop --time 15 "$AI_ID" >/dev/null; return; fi
     if [[ "$command" == backup ]]; then transfer_state export; return; fi
     if [[ "$command" == restore ]]; then transfer_state restore "$1"; return; fi
     if [[ "$command" == extensions ]]; then

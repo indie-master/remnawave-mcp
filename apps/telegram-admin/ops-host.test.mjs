@@ -24,25 +24,26 @@ function fixture() {
     const log = join(root, 'commands.jsonl');
     const docker = `#!/usr/bin/env node
 import fs from 'node:fs';
-import { validateBaseConfiguration, validateControlConfiguration, validateExtensionConfiguration, validateBusinessConfiguration } from ${JSON.stringify(new URL('./ops-config.mjs', import.meta.url).href)};
+import { validateBaseConfiguration, validateControlConfiguration, validateExtensionConfiguration, validateBusinessConfiguration, validateCustomerConfiguration } from ${JSON.stringify(new URL('./ops-config.mjs', import.meta.url).href)};
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.MOCK_LOG, JSON.stringify(args)+'\\n');
 if(args[0]!=='--host'||args[1]!=='unix:///var/run/docker.sock')process.exit(90);
 args.splice(0,2);
 const command=args[0];
-if(command==='ps'){if(args.includes('label=com.docker.compose.project=panel-admin-business')&&process.env.MOCK_BUSINESS)console.log('cccccccccccc');else if(args.some(value=>/com.docker.compose.project=panel-admin-(voice|media|business)/.test(value)))console.log('');else console.log(args.includes('-aq')?'aaaaaaaaaaaa\\nbbbbbbbbbbbb':'Synthetic project healthy');}
+if(command==='ps'){if(args.includes('label=com.docker.compose.project=panel-customer-bot'))console.log(process.env.MOCK_CUSTOMER?'dddddddddddd':'');else if(args.includes('label=com.docker.compose.project=panel-admin-business')&&process.env.MOCK_BUSINESS)console.log('cccccccccccc');else if(args.some(value=>/com.docker.compose.project=panel-admin-(voice|media|business)/.test(value)))console.log('');else console.log(args.includes('-aq')?'aaaaaaaaaaaa\\nbbbbbbbbbbbb':'Synthetic project healthy');}
 else if(command==='inspect'){
  const identifier=args.at(-1);const ai=identifier==='bbbbbbbbbbbb';
  const template=args[2];
  if(template==='{{.Image}}')console.log(ai?${JSON.stringify(aiImage)}:${JSON.stringify(botImage)});
  else if(template.includes('State.Status'))console.log('running|healthy');
  else if(identifier==='cccccccccccc')console.log('portal|'+(process.env.MOCK_BUSINESS_FOREIGN?'another-directory':process.env.MOCK_REPO+'/apps/business'));
+ else if(identifier==='dddddddddddd')console.log('customer|'+(process.env.MOCK_CUSTOMER_FOREIGN?'another-directory':process.env.MOCK_REPO+'/apps/customer-bot'));
  else console.log((ai?'ai':'bot')+'|'+(process.env.MOCK_FOREIGN?'another-directory':process.env.MOCK_APP));
 }else if(command==='exec')console.log(process.env.MOCK_SETTINGS||'AI_ENABLED=true\\nBOT_ENHANCED_UI=true\\nAI_DAILY_LIMIT=100\\nPANEL_ALLOWED_REPORTS=all');
 else if(command==='run'){
  if(process.env.MOCK_VALIDATION_FAIL)process.exit(2);
  const mount=args[args.indexOf('--mount')+1];const filename=mount.match(/src=([^,]+)/)[1];
- try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else if(args.at(-2)==='extensions')validateExtensionConfiguration(text);else if(args.at(-2)==='business')validateBusinessConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
+ try{const text=fs.readFileSync(filename,'utf8');if(args.at(-2)==='base')validateBaseConfiguration(text);else if(args.at(-2)==='extensions')validateExtensionConfiguration(text);else if(args.at(-2)==='business')validateBusinessConfiguration(text);else if(args.at(-2)==='customer')validateCustomerConfiguration(text);else validateControlConfiguration(text);console.log('Synthetic offline configuration valid');}catch{console.error('Synthetic configuration rejected');process.exit(2);}
 }else if(command==='compose'){if(args.includes('up')&&process.env.MOCK_START_FAIL)process.exit(2);if(args.includes('build')){fs.writeFileSync(process.env.MOCK_BUILT,'true');if(process.env.MOCK_BUILD_FAIL)process.exit(2);}}
 else if(command==='image'){
  const reference=args.at(-1);
@@ -275,4 +276,33 @@ test('business start waits for its own health, reports failures, and logs need n
     const before = state.commands().length;
     assert.notEqual(state.run(['business', 'logs'], { MOCK_BUSINESS: 'true', MOCK_BUSINESS_FOREIGN: 'true' }).status, 0);
     assert.ok(!state.commands().slice(before).some(args => args.includes('logs') || args.includes('up') || args.includes('stop')));
+});
+
+test('customer CLI rejects disabled or administrative identities and starts only its isolated project', { skip: !hostTest }, () => {
+    const state = fixture(); const directory = join(state.root, 'apps', 'customer-bot'); mkdirSync(directory);
+    const filename = join(directory, '.env'); const configuration = (enabled, name) => writeFileSync(filename, `CUSTOMER_BOT_ENABLED=${enabled}\nCUSTOMER_BOT_USERNAME=${name}\n`, { mode: 0o600 });
+    configuration(false, 'example_customer_bot'); assert.equal(state.run(['customer', 'check']).status, 0);
+    assert.notEqual(state.run(['customer', 'start']).status, 0);
+    configuration(true, 'example_admin_bot'); assert.notEqual(state.run(['customer', 'start']).status, 0);
+    assert.ok(!state.commands().some(args => args.includes('up') || args.includes('stop')));
+    configuration(true, 'example_customer_bot');
+    const business = join(state.root, 'apps', 'business'); mkdirSync(business);
+    writeFileSync(join(business, '.env'), 'PORTAL_ENABLED=true\nPORTAL_PUBLIC_ORIGIN=http://localhost:8787\nREMNAWAVE_BASE_URL=https://panel.example.invalid\nCUSTOMER_BOT_ENABLED=true\nCUSTOMER_BOT_USERNAME=another_customer_bot\n', { mode: 0o600 });
+    assert.notEqual(state.run(['customer', 'start']).status, 0);
+    assert.ok(!state.commands().some(args => args.includes('up')));
+    writeFileSync(join(business, '.env'), 'PORTAL_ENABLED=true\nPORTAL_PUBLIC_ORIGIN=http://localhost:8787\nREMNAWAVE_BASE_URL=https://panel.example.invalid\nCUSTOMER_BOT_ENABLED=true\nCUSTOMER_BOT_USERNAME=example_customer_bot\n', { mode: 0o600 });
+    assert.equal(state.run(['customer', 'start']).status, 0);
+    const start = state.commands().find(args => args.includes('up'));
+    assert.equal(start[start.indexOf('-p') + 1], 'panel-customer-bot'); assert.equal(start.at(-1), 'customer'); assert.ok(start.includes('--no-deps')); assert.ok(start.includes('--wait'));
+    assert.ok(!state.commands().some(args => args.includes('stop')));
+});
+
+test('customer status/logs do not need credentials and a foreign customer project is never stopped', { skip: !hostTest }, () => {
+    const state = fixture();
+    assert.equal(state.run(['customer', 'status']).status, 0);
+    assert.equal(state.run(['customer', 'logs'], { MOCK_CUSTOMER: 'true' }).status, 0);
+    assert.deepEqual(state.commands().at(-1).slice(2), ['logs', '--tail', '40', 'dddddddddddd']);
+    const before = state.commands().length;
+    assert.notEqual(state.run(['customer', 'stop'], { MOCK_CUSTOMER: 'true', MOCK_CUSTOMER_FOREIGN: 'true' }).status, 0);
+    assert.ok(!state.commands().slice(before).some(args => args.includes('stop') || args.includes('run') || args.includes('up')));
 });

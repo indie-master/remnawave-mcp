@@ -51,6 +51,18 @@ test('visible customer chat receives native answers without reloading or reading
     await page.poll(); assert.equal(page.calls.length, count + 1);
 });
 
+test('Telegram link is shown only for the enabled customer bot and disappears after binding or session expiry', async () => {
+    const value = account({ billing: false, panel: false, media: false }); value.telegram = { enabled: true, linked: false, botUsername: 'example_customer_bot' };
+    const page = browser(value); await page.settle();
+    assert.ok(!page.elements.telegramSection.classes.has('hidden'));
+    page.respond({ ok: true, json: async () => ({ url: 'https://t.me/example_customer_bot?start=' + 'x'.repeat(32), expiresAt: Date.now() + 300000 }) });
+    await page.elements.telegramLink.onclick(); assert.ok(!page.elements.telegramOpen.classes.has('hidden'));
+    page.respond({ ok: true, json: async () => ({ state: 'closed', history: [], telegram: { enabled: true, linked: true } }) });
+    await page.poll(); assert.equal(page.elements.telegramOpen.href, ''); assert.ok(!page.elements.telegramUnlink.classes.has('hidden'));
+    page.respond({ ok: false, json: async () => ({ code: 'SESSION_EXPIRED' }) }); await page.poll();
+    assert.ok(page.elements.telegramSection.classes.has('hidden')); assert.equal(page.elements.telegramOpen.href, '');
+});
+
 test('customer renewal sends the displayed quote once and expired sessions remove private content', async () => {
     const page = browser(account({ billing: true, panel: true, media: false }, [{ currency: 'RUB', units: 12345, days: 30 }])); await page.settle();
     assert.equal(page.elements.renewalPlan.children.length, 1);

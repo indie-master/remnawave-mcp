@@ -5,12 +5,14 @@ import { createConfiguredService } from './configured-service.mjs';
 import { readRuntimeControls } from './runtime-controls.mjs';
 import { readExtensions } from './extensions.mjs';
 import { validateBusinessEnv } from '../business/config.mjs';
+import { validateCustomerSettings } from '../customer-bot/config.mjs';
 
 export const baseKeys = ['REMNAWAVE_BASE_URL', 'BOT_USERNAME', 'TELEGRAM_ADMIN_ID', 'PANEL_USERS_READ_ENABLED'];
 export const controlKeys = ['AI_ENABLED', 'BOT_ENHANCED_UI', 'AI_DAILY_LIMIT', 'PANEL_ALLOWED_REPORTS'];
 export const extensionKeys = ['BOT_AUTO_MENU', 'VOICE_ENABLED', 'VOICE_MAX_SECONDS', 'VOICE_MAX_BYTES', 'ADMIN_USER_READ_ENABLED', 'ADMIN_WRITE_ENABLED', 'ADMIN_ALLOWED_FIELDS', 'ADMIN_RENEWAL_DAYS', 'ADMIN_ACTION_USER_IDS', 'ADMIN_ACTION_NODE_UUIDS', 'ADMIN_DESTRUCTIVE_USER_ACTIONS', 'ADMIN_SQUAD_EDIT_ENABLED', 'ADMIN_CREATE_ENABLED', 'ADMIN_CREATE_SQUADS', 'ADMIN_CREATE_SQUAD_NAMES', 'ADMIN_CREATE_USERNAME_PREFIX', 'ADMIN_CREATE_USERNAME_SUFFIX', 'ADMIN_CREATE_TG_NAME_SOURCE', 'ADMIN_CREATE_DEFAULT_GB', 'ADMIN_CREATE_TRAFFIC_STRATEGY', 'ADMIN_CREATE_HWID_LIMIT', 'BUSINESS_ENABLED', 'SUPPORT_AI_ENABLED'];
 export function validateExtensionConfiguration(text) { return readExtensions(parsePrivateEnv(text, extensionKeys)); }
-export function validateBusinessConfiguration(text) { return validateBusinessEnv(parsePrivateEnv(text, ['PORTAL_ENABLED', 'PORTAL_PUBLIC_ORIGIN', 'PORTAL_PANEL_READ_ENABLED', 'REMNAWAVE_BASE_URL', 'BILLING_MANUAL_ENABLED', 'BILLING_RECONCILIATION_ENABLED', 'BILLING_REVIEW_DELAY_SECONDS', 'SUPPORT_AI_ENABLED', 'PLAN_DAYS', 'PLAN_RUB_UNITS', 'PLAN_USDT_UNITS', 'SEARCH_ENABLED', 'SEARCH_DAILY_LIMIT', 'SEARCH_ALLOWED_HOSTS', 'MEDIA_ENABLED', 'MEDIA_MAX_BYTES', 'MEDIA_ALLOWED_APPS'])); }
+export function validateBusinessConfiguration(text) { return validateBusinessEnv(parsePrivateEnv(text, ['PORTAL_ENABLED', 'PORTAL_PUBLIC_ORIGIN', 'PORTAL_PANEL_READ_ENABLED', 'REMNAWAVE_BASE_URL', 'BILLING_MANUAL_ENABLED', 'BILLING_RECONCILIATION_ENABLED', 'BILLING_REVIEW_DELAY_SECONDS', 'SUPPORT_AI_ENABLED', 'PLAN_DAYS', 'PLAN_RUB_UNITS', 'PLAN_USDT_UNITS', 'SEARCH_ENABLED', 'SEARCH_DAILY_LIMIT', 'SEARCH_ALLOWED_HOSTS', 'MEDIA_ENABLED', 'MEDIA_MAX_BYTES', 'MEDIA_ALLOWED_APPS', 'CUSTOMER_BOT_ENABLED', 'CUSTOMER_BOT_USERNAME'])); }
+export function validateCustomerConfiguration(text) { return validateCustomerSettings(parsePrivateEnv(text, ['CUSTOMER_BOT_ENABLED', 'CUSTOMER_BOT_USERNAME'])); }
 
 export function parsePrivateEnv(text, keys) {
     if (typeof text !== 'string' || Buffer.byteLength(text) > 4096 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) throw new Error('INVALID_PRIVATE_CONFIGURATION');
@@ -41,12 +43,13 @@ export function validateControlConfiguration(text) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     try {
         const args = process.argv.slice(2);
-        if (args.length !== 2 || !['base', 'controls', 'extensions', 'business'].includes(args[0]) || args[1] !== '/configuration.env' || statSync(args[1]).size > 4096) throw new Error('INVALID_PRIVATE_CONFIGURATION');
+        if (args.length !== 2 || !['base', 'controls', 'extensions', 'business', 'customer'].includes(args[0]) || args[1] !== '/configuration.env' || statSync(args[1]).size > 4096) throw new Error('INVALID_PRIVATE_CONFIGURATION');
         const text = readFileSync(args[1], 'utf8');
         if (args[0] === 'base') validateBaseConfiguration(text);
         else if (args[0] === 'controls') validateControlConfiguration(text);
         else if (args[0] === 'extensions') validateExtensionConfiguration(text);
-        else validateBusinessConfiguration(text);
+        else if (args[0] === 'business') validateBusinessConfiguration(text);
+        else validateCustomerConfiguration(text);
         process.stdout.write('Configuration valid; no network or credential files accessed.\n');
     } catch {
         process.stderr.write('Configuration rejected. Check known keys and allowed values; no private values were printed.\n');

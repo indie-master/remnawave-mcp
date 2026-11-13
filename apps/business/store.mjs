@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createCustomerStore } from './customer-store.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const emailAddress = value => typeof value === 'string' && value.length <= 254 && /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(value);
@@ -8,7 +9,7 @@ const unitsValid = value => Number.isSafeInteger(value) && value > 0 && value <=
 export const redactSupport = value => String(value).replace(/https?:\/\/\S+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|\b\d{5,20}:[A-Za-z0-9_-]{30,}\b|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\b(?:\d{1,3}\.){3}\d{1,3}\b/gi, '[скрыто]').slice(0, 500);
 const normalize = value => redactSupport(value).normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ').trim();
 
-export function createBusinessStore({ filename, now = Date.now, reconciliationEnabled = false, reviewDelayMs = 900000 }) {
+export function createBusinessStore({ filename, now = Date.now, reconciliationEnabled = false, reviewDelayMs = 900000, customerEnabled = false }) {
     if (typeof reconciliationEnabled !== 'boolean' || !Number.isSafeInteger(reviewDelayMs) || reviewDelayMs < 300000 || reviewDelayMs > 86400000) throw new Error('INVALID_RECONCILIATION_CONFIGURATION');
     const database = new DatabaseSync(filename);
     database.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=3000;
@@ -36,6 +37,7 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
     const transact = work => { database.exec('BEGIN IMMEDIATE'); try { const result = work(); database.exec('COMMIT'); return result; } catch (error) { database.exec('ROLLBACK'); throw error; } };
     const account = id => { const value = database.prepare('SELECT id,email,panel_id FROM accounts WHERE id=?').get(id); if (!value) throw new Error('ACCOUNT_UNAVAILABLE'); return value; };
     const balance = (id, currency) => database.prepare('SELECT coalesce(sum(units),0) AS balance FROM ledger WHERE account=? AND currency=?').get(id, currency).balance;
+    let customer;
     const api = {
         reconciliationEnabled,
         provision(email, password, panelId) {
@@ -186,8 +188,10 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
             account(id);
             if (!['user', 'assistant'].includes(role) || typeof text !== 'string' || !text.trim() || text.length > 1200) throw new Error('INVALID_MESSAGE');
             database.prepare('DELETE FROM messages WHERE created<?').run(now() - 30 * 86400000);
-            database.prepare('INSERT INTO messages (account,role,text,created) VALUES (?,?,?,?)').run(id, role, redactSupport(text), now());
+            const sanitized = redactSupport(text);
+            const inserted = database.prepare('INSERT INTO messages (account,role,text,created) VALUES (?,?,?,?)').run(id, role, sanitized, now());
             database.prepare('DELETE FROM messages WHERE account=? AND id NOT IN (SELECT id FROM messages WHERE account=? ORDER BY id DESC LIMIT 100)').run(id, id);
+            return { id: Number(inserted.lastInsertRowid), text: sanitized };
         },
         history(id) { account(id); return database.prepare('SELECT role,text FROM messages WHERE account=? AND created>? ORDER BY id DESC LIMIT 6').all(id, now() - 30 * 86400000).reverse().map(value => ({ role: value.role, text: value.text.slice(0, 300) })); },
         supportHistory(id) { account(id); return database.prepare('SELECT role,text FROM messages WHERE account=? AND created>? ORDER BY id DESC LIMIT 50').all(id, now() - 30 * 86400000).reverse().map(value => ({ role: value.role, text: value.text })); },
@@ -213,7 +217,8 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
                 if (previous) { if (previous.ticket !== id || previous.body_hash !== digest) throw new Error('INVALID_MESSAGE'); return { recorded: true, replayed: true }; }
                 const row = database.prepare('SELECT account FROM handoffs WHERE id=? AND state=?').get(id, 'pending');
                 if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-                api.append(row.account, 'assistant', text);
+                const message = api.append(row.account, 'assistant', text);
+                customer.enqueue(row.account, message, 'reply:' + key);
                 database.prepare('INSERT INTO support_receipts VALUES (?,?,?,?)').run(key, id, digest, now());
                 return { recorded: true };
             });
@@ -231,7 +236,8 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
             return transact(() => {
                 const row = database.prepare('SELECT account FROM handoffs WHERE id=? AND state=?').get(id, 'pending');
                 if (!row) throw new Error('SUPPORT_TICKET_UNAVAILABLE');
-                api.append(row.account, 'assistant', text);
+                const message = api.append(row.account, 'assistant', text);
+                customer.enqueue(row.account, message, 'legacy:' + id);
                 database.prepare('UPDATE handoffs SET state=? WHERE id=?').run('resolved', id);
                 return { recorded: true };
             });
@@ -288,7 +294,8 @@ export function createBusinessStore({ filename, now = Date.now, reconciliationEn
         },
         close: () => database.close(),
     };
-    return api;
+    customer = createCustomerStore({ database, transact, api, enabled: customerEnabled, now });
+    return Object.assign(api, { customer });
 }
 
 export function createSupport({ store, answer, search, now = Date.now }) {

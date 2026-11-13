@@ -9,8 +9,9 @@ import { validateBusinessEnv } from './config.mjs';
 import { createGuideLibrary } from './guides.mjs';
 import { createBillingAdministration } from './billing-admin.mjs';
 import { createSupportAdministration } from './support-admin.mjs';
+import { createCustomerGateway } from './customer-api.mjs';
 
-let store; let portal; let administration;
+let store; let portal; let administration; let customer;
 try {
 process.umask(0o077);
 validateBusinessEnv(process.env);
@@ -18,7 +19,7 @@ const enabled = name => { if (!['true', 'false'].includes(process.env[name] ?? '
 if (!enabled('PORTAL_ENABLED')) throw new Error('PORTAL_NOT_AUTHORIZED');
 mkdirSync('/state', { recursive: true, mode: 0o700 });
 mkdirSync('/business-bridge', { recursive: true, mode: 0o700 });
-store = createBusinessStore({ filename: '/state/business.sqlite', reconciliationEnabled: enabled('BILLING_RECONCILIATION_ENABLED'), reviewDelayMs: Number(process.env.BILLING_REVIEW_DELAY_SECONDS ?? 900) * 1000 });
+store = createBusinessStore({ filename: '/state/business.sqlite', reconciliationEnabled: enabled('BILLING_RECONCILIATION_ENABLED'), reviewDelayMs: Number(process.env.BILLING_REVIEW_DELAY_SECONDS ?? 900) * 1000, customerEnabled: enabled('CUSTOMER_BOT_ENABLED') });
 for (const item of JSON.parse(readFileSync(new URL('./faq.json', import.meta.url), 'utf8'))) store.addKnowledge(item.id, item.aliases, item.answer);
 const supportAi = enabled('SUPPORT_AI_ENABLED');
 const support = createSupport({ store, search: enabled('SEARCH_ENABLED') ? createReferenceSearch({ store, allowedHosts: (process.env.SEARCH_ALLOWED_HOSTS ?? 'docs.rw').split(','), dailyLimit: Number(process.env.SEARCH_DAILY_LIMIT ?? 0) }) : undefined, answer: supportAi ? value => new Promise((resolve, reject) => {
@@ -29,11 +30,20 @@ const support = createSupport({ store, search: enabled('SEARCH_ENABLED') ? creat
 }) : undefined });
 const client = enabled('PORTAL_PANEL_READ_ENABLED') ? createUserClient({ baseUrl: process.env.REMNAWAVE_BASE_URL, readTokenFile: '/run/secrets/panel_api_token' }) : undefined;
 const manualBilling = enabled('BILLING_MANUAL_ENABLED');
-portal = createPortal({ store, support, origin: process.env.PORTAL_PUBLIC_ORIGIN, billingEnabled: manualBilling, guides: createGuideLibrary(), analyzeMedia: enabled('MEDIA_ENABLED') ? createMediaAnalyzer({ applications: process.env.MEDIA_ALLOWED_APPS ?? 'happ' }) : undefined, maxMediaBytes: Number(process.env.MEDIA_MAX_BYTES ?? 5242880), plans: { RUB: { units: Number(process.env.PLAN_RUB_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) }, USDT: { units: Number(process.env.PLAN_USDT_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) } }, panelRead: client ? async id => {
+const panelRead = client ? async id => {
     const user = await client.get(String(id));
     if (user?.id !== id || !['ACTIVE', 'DISABLED', 'EXPIRED', 'LIMITED'].includes(user.status) || typeof user.expireAt !== 'string') throw new Error('PANEL_UNAVAILABLE');
     return { status: user.status, expireAt: user.expireAt, observedAt: new Date().toISOString() };
-} : undefined });
+} : undefined;
+portal = createPortal({ store, support, origin: process.env.PORTAL_PUBLIC_ORIGIN, billingEnabled: manualBilling, guides: createGuideLibrary(), analyzeMedia: enabled('MEDIA_ENABLED') ? createMediaAnalyzer({ applications: process.env.MEDIA_ALLOWED_APPS ?? 'happ' }) : undefined, maxMediaBytes: Number(process.env.MEDIA_MAX_BYTES ?? 5242880), plans: { RUB: { units: Number(process.env.PLAN_RUB_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) }, USDT: { units: Number(process.env.PLAN_USDT_UNITS ?? 0), days: Number(process.env.PLAN_DAYS ?? 30) } }, panelRead, customerUsername: enabled('CUSTOMER_BOT_ENABLED') ? process.env.CUSTOMER_BOT_USERNAME : undefined });
+if (enabled('CUSTOMER_BOT_ENABLED')) {
+    const path = '/customer-bridge/customer.sock'; mkdirSync('/customer-bridge', { recursive: true, mode: 0o700 });
+    if (existsSync(path)) { if (!statSync(path).isSocket()) throw new Error('INVALID_CUSTOMER_SOCKET'); unlinkSync(path); }
+    customer = createServer(createCustomerGateway({ store, username: process.env.CUSTOMER_BOT_USERNAME, panelRead }));
+    customer.headersTimeout = 5000; customer.requestTimeout = 5000; customer.timeout = 20000; customer.maxConnections = 8;
+    customer.on('clientError', (_error, connection) => connection.destroy());
+    await new Promise(resolve => customer.listen(path, resolve)); chmodSync(path, 0o600);
+}
 const socket = '/business-bridge/admin.sock';
 if (existsSync(socket)) { if (!statSync(socket).isSocket()) throw new Error('INVALID_BUSINESS_SOCKET'); unlinkSync(socket); }
 const billingAdministration = createBillingAdministration({ store, enabled: manualBilling });
@@ -74,10 +84,10 @@ administration.on('clientError', (_error, connection) => connection.destroy());
 await new Promise(resolve => administration.listen(socket, resolve)); chmodSync(socket, 0o600);
 await new Promise(resolve => portal.listen(8787, '0.0.0.0', resolve));
 process.stdout.write(JSON.stringify({ ready: true, customerSending: false, manualBilling }) + '\n');
-const stop = () => { portal.closeAllConnections(); administration.closeAllConnections(); portal.close(); administration.close(() => { store.close(); process.exitCode = 0; }); };
+const stop = () => { customer?.closeAllConnections(); customer?.close(); portal.closeAllConnections(); administration.closeAllConnections(); portal.close(); administration.close(() => { store.close(); process.exitCode = 0; }); };
 process.once('SIGINT', stop); process.once('SIGTERM', stop);
 } catch {
-    portal?.closeAllConnections(); administration?.closeAllConnections(); portal?.close(); administration?.close(); store?.close();
+    customer?.closeAllConnections(); customer?.close(); portal?.closeAllConnections(); administration?.closeAllConnections(); portal?.close(); administration?.close(); store?.close();
     process.stderr.write('Business modules unavailable. Verify explicit enablement and validated private configuration; no private values printed.\n');
     process.exitCode = 2;
 }

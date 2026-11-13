@@ -46,3 +46,5 @@
 !apps/telegram-admin/start-admin-mcp.mjs
 !apps/business/
 !apps/business/config.mjs
+!apps/customer-bot/
+!apps/customer-bot/config.mjs

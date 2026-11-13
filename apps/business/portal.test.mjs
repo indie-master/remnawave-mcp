@@ -52,16 +52,16 @@ test('portal login/CSRF/Host/account isolation and payment workflow use only syn
     } finally { portal.closeAllConnections(); await new Promise(resolve => portal.close(resolve)); store.close(); }
 });
 
-async function portalFixture(options = {}) {
-    const store = createBusinessStore({ filename: ':memory:' });
+async function portalFixture({ customerEnabled = false, ...options } = {}) {
+    const store = createBusinessStore({ filename: ':memory:', customerEnabled });
     const first = store.provision('pilot@example.invalid', 'synthetic-password-only', 48).id;
     const origin = 'http://localhost:8787';
     const server = createPortal({ store, origin, support: createSupport({ store }), ...options });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     let cookie; let csrf;
     const close = async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); store.close(); };
-    const call = (path, body, authorized = true) => new Promise((resolve, reject) => {
-        const outgoing = request({ host: '127.0.0.1', port: server.address().port, path: '/api/' + path, method: body === undefined ? 'GET' : 'POST', agent: false, headers: { Host: 'localhost:8787', Origin: origin, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(authorized ? { Cookie: cookie, 'X-CSRF-Token': csrf } : {}) } }, incoming => {
+    const call = (path, body, authorized = true, extraHeaders = {}) => new Promise((resolve, reject) => {
+        const outgoing = request({ host: '127.0.0.1', port: server.address().port, path: '/api/' + path, method: body === undefined ? 'GET' : 'POST', agent: false, headers: { Host: 'localhost:8787', Origin: origin, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(authorized ? { Cookie: cookie, 'X-CSRF-Token': csrf } : {}), ...extraHeaders } }, incoming => {
             let text = ''; incoming.on('data', chunk => { text += chunk; });
             incoming.on('end', () => { try { resolve({ status: incoming.statusCode, data: JSON.parse(text), headers: incoming.headers }); } catch (error) { reject(error); } });
         }); outgoing.on('error', reject); outgoing.end(body === undefined ? undefined : JSON.stringify(body));
@@ -115,5 +115,25 @@ test('zero price remains unavailable and legacy currency-only renewal requests r
         const deposit = pilot.store.payment(pilot.first, 'USDT', 1000000); pilot.store.approvePayment(deposit.id, 'test:pilot-usdt');
         assert.equal((await pilot.call('renewal', { currency: 'USDT' })).status, 200);
         assert.equal(pilot.store.account(pilot.first).balances.USDT, 1000000);
+    } finally { await pilot.close(); }
+});
+
+test('portal Telegram linking requires its own logged-in CSRF session and never accepts a supplied account or Telegram ID', async () => {
+    const pilot = await portalFixture({ customerEnabled: true, customerUsername: 'example_customer_bot' });
+    try {
+        assert.equal((await pilot.call('telegram-link', {}, false)).status, 401);
+        assert.equal((await pilot.call('telegram-link', {}, true, { 'X-CSRF-Token': 'wrong' })).status, 400);
+        assert.equal((await pilot.call('telegram-link', { account: 'another' })).status, 400);
+        assert.equal((await pilot.call('telegram-link', { telegramId: 111111111 })).status, 400);
+        const response = await pilot.call('telegram-link', {}); assert.equal(response.status, 200);
+        const url = new URL(response.data.url); assert.equal(url.origin, 'https://t.me'); assert.equal(url.pathname, '/example_customer_bot');
+        const code = url.searchParams.get('start'); assert.match(code, /^[A-Za-z0-9_-]{32}$/);
+        pilot.store.customer.link(111111111, code);
+        const account = (await pilot.call('account')).data;
+        assert.equal(account.telegram.linked, true); assert.ok(!JSON.stringify(account).includes(code));
+        assert.equal((await pilot.call('support')).data.telegram.linked, true);
+        assert.equal((await pilot.call('telegram-unlink', { account: 'another' })).status, 400);
+        assert.equal((await pilot.call('telegram-unlink', {})).data.unlinked, true);
+        assert.throws(() => pilot.store.customer.account(111111111), /NOT_LINKED/);
     } finally { await pilot.close(); }
 });

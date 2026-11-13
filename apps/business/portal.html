@@ -3,13 +3,15 @@
 <style nonce="__NONCE__">:root{color-scheme:dark;font:16px system-ui;background:#101925;color:#e9f1fc}body{max-width:800px;margin:5vh auto;padding:20px}section{background:#182638;border:1px solid #344458;border-radius:18px;padding:24px;margin:20px 0}h1{font-size:30px}h2{font-size:21px}input,textarea,select,button{font:inherit;border-radius:9px;padding:12px;border:1px solid #465970;box-sizing:border-box}input,textarea{width:100%;margin:8px 0;background:#101925;color:inherit}button{background:#aecfff;color:#102038;cursor:pointer;margin:8px 8px 0 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#c9d8eb}small{color:#a9bad0}.hidden{display:none}</style></head>
 <body><h1>Личный кабинет</h1><small>Подписка, баланс и поддержка — без Telegram.</small><section id="login"><h2>Вход по почте</h2><form id="loginForm"><label>Почта<input id="email" type="email" autocomplete="username" required></label><label>Пароль<input id="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required></label><button>Войти</button></form><small>Первый доступ выдаёт администратор. Самостоятельной регистрации и проверки почты пока нет.</small></section>
 <main id="account" class="hidden"><section><h2>Ваш аккаунт</h2><pre id="details"></pre><button id="subscription" class="hidden">Проверить подписку</button><button id="logout">Выйти</button><pre id="subscriptionDetails"></pre></section>
+<section id="telegramSection" class="hidden"><h2>Ваш Telegram</h2><p>Подключите клиентского бота, чтобы получать ответы поддержки в Telegram. Пароль и ссылку подписки ему отправлять не нужно.</p><p id="telegramState"></p><button id="telegramLink">Подключить Telegram</button><a id="telegramOpen" class="hidden" target="_blank" rel="noopener noreferrer">Открыть клиентского бота</a><button id="telegramUnlink" class="hidden">Отвязать Telegram</button><small>Ссылка подключения действует пять минут и используется один раз. Не пересылайте её другим людям.</small></section>
 <section id="renewalSection" class="hidden"><h2>Продление подписки</h2><p>Выберите тариф. Заявку проверит администратор перед продлением и списанием баланса.</p><label>Тариф <select id="renewalPlan" aria-label="Тариф продления"></select></label><p id="planDetails"></p><button id="renew" disabled>Подать заявку на продление</button><h2>Ваши заявки</h2><pre id="renewals"></pre><small>Если результат ещё проверяется, дождитесь ответа администратора.</small></section>
 <section id="paymentSection" class="hidden"><h2>Пополнение баланса</h2><p>Поступление проверяет администратор. Заявка сама по себе не зачисляет деньги.</p><form id="paymentForm"><label>Валюта <select id="currency"><option>RUB</option><option>USDT</option></select></label><label>Сумма<input id="amount" inputmode="decimal" placeholder="Сумма" required></label><button>Создать заявку</button></form><pre id="payments"></pre></section>
 <section><h2>Поддержка</h2><p>Не отправляйте пароли, токены и ссылки подписки. История доступна только вашему аккаунту.</p><small id="supportState" role="status"></small><div id="history" class="messages" role="log" aria-live="polite" aria-label="Переписка с поддержкой"></div><form id="supportForm"><textarea id="question" maxlength="500" required placeholder="Напишите сообщение поддержке"></textarea><button>Отправить</button></form><div id="sources"></div><form id="mediaForm" class="hidden"><p>Если обращение передано администратору, можно приложить скриншот или короткое MP4 до 30 секунд. Скройте секреты заранее. Файл обрабатывается локально и удаляется; модели может передаваться только очищенный текст.</p><input id="mediaFile" type="file" accept="image/png,image/jpeg,video/mp4" required><button>Приложить к обращению</button></form><button id="erase">Удалить историю</button></section></main><pre id="status" role="status"></pre>
 <section id="guideSection" class="hidden"><h2>Иллюстрации подключения</h2><button id="showGuides">Открыть проверенные инструкции</button><div id="guideImages"></div></section>
 <style nonce="__NONCE__">#guideImages img{max-width:100%;border-radius:12px}#sources a{color:#aecfff}.messages{display:flex;flex-direction:column;gap:12px;max-height:480px;overflow:auto;margin:18px 0}.message{max-width:85%;padding:14px 18px;border-radius:16px;background:#25394f;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}.message strong{display:block;font-size:13px;margin-bottom:5px;color:#aecfff}.message.mine{align-self:flex-end;background:#27476a}.message.theirs{align-self:flex-start}</style>
+<style nonce="__NONCE__">#telegramOpen{color:#aecfff;margin:12px;overflow-wrap:anywhere}</style>
 <script nonce="__NONCE__">
-let csrf; let plans = []; let busy = false; let historyStamp; let supportPolling = false;
+let csrf; let plans = []; let busy = false; let historyStamp; let supportPolling = false; let customerBotUsername; let telegramLinkExpiry = 0;
 const element = id => document.getElementById(id);
 const money = (units, currency) => (units / (currency === 'RUB' ? 100 : 1000000)).toLocaleString('ru-RU', { minimumFractionDigits: currency === 'RUB' ? 2 : 0, maximumFractionDigits: currency === 'RUB' ? 2 : 6 }) + ' ' + currency;
 const states = { pending: 'Ожидает проверки', executing: 'Выполняется', uncertain: 'Проверяется администратором', approved: 'Зачислено', rejected: 'Отклонено', done: 'Выполнено', refunded: 'Возвращено' };
@@ -18,6 +20,16 @@ function selectPlan() {
     const plan = plans.find(value => value.currency === element('renewalPlan').value);
     element('planDetails').textContent = plan ? 'Продление на ' + plan.days + ' дн. · ' + money(plan.units, plan.currency) : csrf ? 'Тарифы ещё не настроены. Обратитесь к администратору.' : '';
     element('renew').disabled = busy || !plan;
+}
+function clearTelegramLink() { element('telegramOpen').href = ''; element('telegramOpen').classList.add('hidden'); telegramLinkExpiry = 0; }
+function renderTelegram(value) {
+    if (value?.botUsername !== undefined) customerBotUsername = value.botUsername;
+    const available = value?.enabled && typeof customerBotUsername === 'string' && /^(?=.{5,32}$)[A-Za-z0-9_]+bot$/i.test(customerBotUsername);
+    element('telegramSection').classList.toggle('hidden', !available);
+    element('telegramLink').classList.toggle('hidden', !!value?.linked);
+    element('telegramUnlink').classList.toggle('hidden', !value?.linked);
+    element('telegramState').textContent = value?.linked ? 'Telegram подключён. Ответы поддержки будут приходить в ваш чат.' : 'Telegram ещё не подключён.';
+    if (!available || value.linked) clearTelegramLink();
 }
 function renderHistory(history) {
     const stamp = JSON.stringify(history);
@@ -34,19 +46,22 @@ function renderHistory(history) {
     if (bottom) log.scrollTop = log.scrollHeight;
 }
 async function pollSupport() {
+    if (telegramLinkExpiry && telegramLinkExpiry <= Date.now()) clearTelegramLink();
     if (!csrf || busy || supportPolling || document.visibilityState !== 'visible') return;
     const session = csrf; supportPolling = true;
     try {
         const data = await api('support'); if (csrf !== session) return;
         renderHistory(data.history);
+        if (data.telegram) renderTelegram(data.telegram);
         element('supportState').textContent = data.state === 'open' ? 'Диалог с поддержкой открыт' : 'Задайте вопрос — ответ появится в этой переписке';
     } catch (error) { if (csrf === session && error.message === 'SESSION_EXPIRED') { signedOut(); element('status').textContent = errors.SESSION_EXPIRED; } }
     finally { supportPolling = false; }
 }
 function signedOut() {
-    csrf = undefined; plans = []; historyStamp = undefined;
+    csrf = undefined; plans = []; historyStamp = undefined; customerBotUsername = undefined; clearTelegramLink();
+    element('telegramSection').classList.add('hidden');
     element('account').classList.add('hidden'); element('guideSection').classList.add('hidden'); element('login').classList.remove('hidden');
-    for (const id of ['details', 'history', 'payments', 'renewals', 'subscriptionDetails', 'sources', 'guideImages', 'planDetails', 'supportState']) element(id).replaceChildren();
+    for (const id of ['details', 'history', 'payments', 'renewals', 'subscriptionDetails', 'sources', 'guideImages', 'planDetails', 'supportState', 'telegramState']) element(id).replaceChildren();
     for (const id of ['question', 'mediaFile', 'amount', 'password']) element(id).value = '';
     element('renewalPlan').replaceChildren();
 }
@@ -63,6 +78,7 @@ async function refresh() {
     element('paymentSection').classList.toggle('hidden', !data.features.billing);
     element('renewalSection').classList.toggle('hidden', !data.features.billing);
     element('subscription').classList.toggle('hidden', !data.features.panel);
+    renderTelegram(data.telegram);
     plans = data.plans ?? [];
     const selected = element('renewalPlan').value;
     element('renewalPlan').replaceChildren();
@@ -90,6 +106,13 @@ element('supportForm').onsubmit = event => { event.preventDefault(); perform(asy
 element('mediaForm').onsubmit = event => { event.preventDefault(); perform(async () => { const file = element('mediaFile').files[0]; if (!file || file.size > 10485760) throw new Error('MEDIA_REJECTED'); await api('allow-media', {}); const response = await fetch('/api/media', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': file.type, 'X-CSRF-Token': csrf }, body: file }); const data = await response.json(); if (!response.ok) throw new Error(data.code); element('mediaFile').value = ''; await refresh(); element('status').textContent = data.reply; }); };
 element('subscription').onclick = () => perform(async () => { const data = await api('subscription'); element('subscriptionDetails').textContent = 'Статус: ' + data.status + '\nДо: ' + data.expireAt + '\nПроверено: ' + data.observedAt; });
 element('renewalPlan').onchange = selectPlan;
+element('telegramLink').onclick = () => perform(async () => {
+    const data = await api('telegram-link', {}); const url = new URL(data.url);
+    if (url.origin !== 'https://t.me' || url.pathname !== '/' + customerBotUsername || url.username || url.password || url.hash || [...url.searchParams.keys()].join(',') !== 'start' || !/^[A-Za-z0-9_-]{32}$/.test(url.searchParams.get('start') ?? '') || !Number.isSafeInteger(data.expiresAt)) throw new Error('REQUEST_REJECTED');
+    element('telegramOpen').href = url.href; telegramLinkExpiry = data.expiresAt;
+    element('telegramOpen').classList.remove('hidden'); element('status').textContent = 'Откройте клиентского бота и нажмите «Запустить». Ссылка доступна пять минут.';
+});
+element('telegramUnlink').onclick = () => perform(async () => { await api('telegram-unlink', {}); clearTelegramLink(); await refresh(); });
 element('renew').onclick = () => perform(async () => { const plan = plans.find(value => value.currency === element('renewalPlan').value); if (!plan) throw new Error('RENEWAL_PLAN_UNAVAILABLE'); const data = await api('renewal', { currency: plan.currency, units: plan.units, days: plan.days }); await refresh(); element('status').textContent = data.note; });
 element('logout').onclick = () => perform(async () => { await api('logout', {}); location.reload(); });
 element('erase').onclick = () => perform(async () => { await api('erase-history', {}); await refresh(); });
