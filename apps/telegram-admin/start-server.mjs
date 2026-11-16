@@ -12,6 +12,7 @@ import { readExtensions } from './extensions.mjs';
 import { createVoiceInput } from './voice-client.mjs';
 import { createUserClient, createUserAdministration, createAdminHandler } from './admin-users.mjs';
 import { createBusinessAdmin } from './business-client.mjs';
+import { receiverCause } from './network-retry.mjs';
 
 const controller = new AbortController();
 const stop = () => controller.abort();
@@ -31,7 +32,7 @@ async function main() {
     safety = createRunSafety({ directory });
     const previous = safety.read();
     if (previous.mode === 'paused') {
-        event({ status: 'paused', reason: previous.reason, externalCalls: false });
+        event({ status: 'paused', reason: previous.reason, externalCalls: false, ...(previous.lastCause ? { cause: receiverCause({ code: previous.lastCause }) } : {}) });
         const heartbeat = () => writeFileSync(join(directory, 'heartbeat.json'), JSON.stringify({ observedAt: Date.now(), phase: 'paused' }), { mode: 0o600 });
         heartbeat();
         await waitForOperator({ signal: controller.signal, heartbeat });
@@ -89,7 +90,7 @@ async function main() {
             writeFileSync(offsetFile + '.tmp', JSON.stringify({ offset }), { mode: 0o600 });
             renameSync(offsetFile + '.tmp', offsetFile);
         },
-        heartbeat: () => writeFileSync(heartbeatFile, JSON.stringify({ observedAt: Date.now(), phase: 'ready' }), { mode: 0o600 }),
+        heartbeat: (phase = 'ready') => writeFileSync(heartbeatFile, JSON.stringify({ observedAt: Date.now(), phase }), { mode: 0o600 }),
         onEvent: event,
         onReady: data => {
             if (!options.continuous) timer = setTimeout(stop, options.seconds * 1000);
@@ -103,8 +104,10 @@ async function main() {
 }
 try {
     await main();
-} catch {
-    try { safety?.record({ status: 'failed', startedAt: null, stoppedAt: new Date().toISOString() }); } catch {}
+} catch (error) {
+    const diagnostic = { cause: receiverCause(error), phase: 'configuration' };
+    event({ status: 'failed', ...diagnostic });
+    try { safety?.record({ status: 'failed', startedAt: null, stoppedAt: new Date().toISOString(), ...diagnostic }); } catch {}
     process.stderr.write('Server bot not started or unavailable. Verify explicit startup approval, configuration and credential files. No private details were printed.\n');
     process.exitCode = 2;
 } finally {

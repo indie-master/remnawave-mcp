@@ -11,5 +11,6 @@
 !apps/telegram-client/telegram-api.mjs
 !apps/telegram-admin/
 !apps/telegram-admin/run-safety.mjs
+!apps/telegram-admin/network-retry.mjs
 !apps/telegram-admin/healthcheck.mjs
 !apps/telegram-admin/state-control.mjs

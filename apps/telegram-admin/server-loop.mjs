@@ -1,6 +1,7 @@
 import { createDashboard } from './dashboard.mjs';
 import { reportActions } from './intent.mjs';
 import { createMenuSession } from './menu-session.mjs';
+import { createReadRetry, receiverCause, uncertainDelivery } from './network-retry.mjs';
 
 const sleepDefault = (milliseconds, signal) => new Promise(resolve => {
     if (signal?.aborted) { resolve(); return; }
@@ -14,14 +15,16 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
     const result = { status: 'stopped', reason: null, replies: 0, polls: 0, startedAt: null, stoppedAt: null };
     let ready = false;
     let deadline;
+    let phase = 'offset';
+    const read = continuous ? createReadRetry({ signal: signal ?? new AbortController().signal, sleep, heartbeat, onEvent }) : operation => operation();
     const notification = text => ({ chat_id: allowedUserId, text, protect_content: true });
     try {
         let offset = await loadOffset();
         if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0)) throw new Error('INVALID_STATE');
         if (signal?.aborted) throw new Error('STOP_REQUESTED');
-        const identity = await api.getMe();
+        phase = 'get_me'; const identity = await read(() => api.getMe(), phase);
         if (identity?.is_bot !== true || identity.username?.toLowerCase() !== botUsername?.toLowerCase()) throw new Error('BOT_IDENTITY_MISMATCH');
-        const webhook = await api.getWebhookInfo();
+        phase = 'webhook'; const webhook = await read(() => api.getWebhookInfo(), phase);
         if (typeof webhook?.url !== 'string' || webhook.url !== '') throw new Error('WEBHOOK_BLOCKED');
         const started = now();
         result.startedAt = new Date(started).toISOString();
@@ -37,11 +40,15 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
         } : undefined;
         const handle = createDashboard({ allowedUserId, service: guardedService, classify, mcpRead: readMcp, budgetStatus, textModeDescription, enhancedUi, adminHandle, adminDirectory, adminCreate, extraButtons, answerCallback: api.answerCallback, now, onDiagnostic: onEvent });
         const menuSession = enhancedUi ? createMenuSession({ api, handle, allowedUserId, collapsible: autoMenu, onDelivery: onReplyDelivery, canDeliver: () => !signal?.aborted && now() < deadline }) : undefined;
-        await api.sendReply(notification(continuous
+        phase = 'startup_notice';
+        try { await api.sendReply(notification(continuous
             ? 'Бот запущен на сервере. Кнопки работают без ИИ. Отправка клиентам отключена.'
-            : `Тест бота начался на ${seconds / 60} мин. Остановка: ${new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', timeStyle: 'medium' }).format(new Date(deadline))} МСК. Кнопки работают без ИИ, отправка клиентам отключена.`));
-        result.replies++;
-        if (menuSession && autoMenu) result.replies += await menuSession.open(handle.home());
+            : `Тест бота начался на ${seconds / 60} мин. Остановка: ${new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', timeStyle: 'medium' }).format(new Date(deadline))} МСК. Кнопки работают без ИИ, отправка клиентам отключена.`)); result.replies++; }
+        catch (error) { if (!continuous || !uncertainDelivery(error)) throw error; onEvent({ event: 'startup_notice', ok: false, code: receiverCause(error) }); }
+        if (menuSession && autoMenu) {
+            try { result.replies += await menuSession.open(handle.home()); }
+            catch (error) { if (!continuous || !uncertainDelivery(error)) throw error; onEvent({ event: 'startup_menu', ok: false, code: receiverCause(error) }); }
+        }
         ready = true;
         heartbeat();
         onReady({ ready: true, continuous, maxSeconds: continuous ? null : seconds, subscriptionAi: aiEnabled, cachedText: !!classify, enhancedUi, customerSending: false, startedAt: result.startedAt });
@@ -49,7 +56,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
         while (!signal?.aborted && now() < deadline) {
             let updates;
             try {
-                updates = await api.getUpdates(offset);
+                phase = 'poll'; updates = await read(() => api.getUpdates(offset), phase);
                 result.polls++;
                 consecutiveErrors = 0;
                 heartbeat();
@@ -65,8 +72,10 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
                 if (signal?.aborted || now() >= deadline) break;
                 if (offset !== undefined && update.update_id < offset) continue;
                 offset = update.update_id + 1;
+                phase = 'offset';
                 await saveOffset(offset);
                 try {
+                    phase = 'delivery';
                     const input = voiceInput ? await voiceInput(update) : update;
                     if (!input) continue;
                     if (menuSession) result.replies += await menuSession.process(input);
@@ -80,7 +89,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
                             await api.sendReply(notification('Голос не распознан уверенно или превышает ограничения. Повторите коротко либо используйте кнопки. Внешнее распознавание речи не использовалось.'));
                             result.replies++; continue;
                         }
-                        if (error?.code !== 'NETWORK_FAILED') throw error;
+                        if (!uncertainDelivery(error)) throw error;
                         onEvent({ event: 'delivery', ok: false, code: 'DELIVERY_UNCERTAIN' });
                 }
                 heartbeat();
@@ -94,6 +103,7 @@ export async function runServerBot({ api, service, allowedUserId, botUsername, c
             const blocked = ['BOT_IDENTITY_MISMATCH', 'WEBHOOK_BLOCKED', 'RECEIVER_CONFLICT', 'INVALID_STATE'];
             result.status = blocked.includes(error?.code ?? error?.message) ? 'blocked' : 'failed';
             result.reason = blocked.includes(error?.code ?? error?.message) ? error.code ?? error.message : 'CONNECTION_OR_CONFIGURATION_FAILED';
+            result.cause = receiverCause(error); result.phase = phase;
         }
     } finally {
         result.stoppedAt = new Date(now()).toISOString();

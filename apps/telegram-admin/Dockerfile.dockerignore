@@ -19,6 +19,7 @@
 !apps/telegram-admin/budgeted-intent.mjs
 !apps/telegram-admin/report-mcp.mjs
 !apps/telegram-admin/run-safety.mjs
+!apps/telegram-admin/network-retry.mjs
 !apps/telegram-admin/state-control.mjs
 !apps/telegram-admin/server-config.mjs
 !apps/telegram-admin/server-loop.mjs

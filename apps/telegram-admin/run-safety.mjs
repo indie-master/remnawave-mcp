@@ -1,5 +1,6 @@
 import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { receiverCause } from './network-retry.mjs';
 
 const reasons = ['RECEIVER_CONFLICT', 'WEBHOOK_BLOCKED', 'BOT_IDENTITY_MISMATCH', 'INVALID_STATE', 'REPEATED_STARTUP_FAILURE', 'SAFETY_STATE_UNAVAILABLE'];
 
@@ -21,15 +22,16 @@ export function createRunSafety({ directory, now = Date.now }) {
         read,
         record: result => {
             const state = read();
+            const diagnostic = result.cause ? { lastCause: receiverCause({ code: result.cause }), ...(['configuration', 'get_me', 'webhook', 'gateway', 'registration', 'offset', 'startup_notice', 'poll', 'delivery'].includes(result.phase) ? { lastPhase: result.phase } : {}) } : {};
             if (state.mode === 'paused') return state;
             if (result.status === 'blocked') {
-                const value = { mode: 'paused', reason: reasons.includes(result.reason) ? result.reason : 'SAFETY_STATE_UNAVAILABLE', failures: 5, lastFailure: now() };
+                const value = { mode: 'paused', reason: reasons.includes(result.reason) ? result.reason : 'SAFETY_STATE_UNAVAILABLE', failures: 5, lastFailure: now(), ...diagnostic };
                 write(value); return value;
             }
             if (result.status === 'failed') {
                 const duration = Date.parse(result.stoppedAt) - Date.parse(result.startedAt);
                 const failures = state.lastFailure && now() - state.lastFailure < 900000 && !(duration >= 60000) ? Math.min(5, state.failures + 1) : 1;
-                const value = { mode: failures >= 5 ? 'paused' : 'active', failures, lastFailure: now(), ...(failures >= 5 ? { reason: 'REPEATED_STARTUP_FAILURE' } : {}) };
+                const value = { mode: failures >= 5 ? 'paused' : 'active', failures, lastFailure: now(), ...diagnostic, ...(failures >= 5 ? { reason: 'REPEATED_STARTUP_FAILURE' } : {}) };
                 write(value); return value;
             }
             write({ mode: 'active', failures: 0, lastFailure: 0 });

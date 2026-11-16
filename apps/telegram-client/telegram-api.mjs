@@ -41,8 +41,14 @@ export function createTelegramApi({ token, allowedUserId, fetchImpl = fetch, sig
                 }
                 chunks.push(part.value);
             }
+            if (response.status >= 500 && response.status <= 599) throw new TelegramError('TELEGRAM_TEMPORARY_UNAVAILABLE');
             const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (!response.ok || payload?.ok !== true) {
+                if (response.status === 429) {
+                    const error = new TelegramError('TELEGRAM_RATE_LIMIT');
+                    error.retryAfter = Number.isInteger(payload?.parameters?.retry_after) ? Math.max(1, Math.min(300, payload.parameters.retry_after)) : 60;
+                    throw error;
+                }
                 if (response.status === 400 && method === 'editMessageText') {
                     if (payload?.description === 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message') throw new TelegramError('EDIT_NOT_MODIFIED');
                     if (["Bad Request: message can't be edited", 'Bad Request: message to edit not found'].includes(payload?.description)) throw new TelegramError('EDIT_UNAVAILABLE');
