@@ -17,6 +17,7 @@
 !apps/telegram-admin/ai-login.mjs
 !apps/telegram-admin/ai-state-control.mjs
 !apps/telegram-admin/run-safety.mjs
+!apps/telegram-admin/network-retry.mjs
 !apps/telegram-admin/state-control.mjs
 !apps/telegram-admin/healthcheck.mjs
 !apps/telegram-admin/classifier-instructions.md
