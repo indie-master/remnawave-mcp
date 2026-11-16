@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReadRetry } from './network-retry.mjs';
@@ -60,5 +62,15 @@ test('persistent startup guard records a fixed cause and phase without weakening
         assert.equal(state.mode, 'paused'); assert.equal(state.lastCause, 'TELEGRAM_REQUEST_FAILED'); assert.equal(state.lastPhase, 'get_me');
         assert.equal(safety.record({ status: 'stopped' }).mode, 'paused');
         safety.acknowledge(); assert.equal(safety.read().mode, 'active');
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('a new admin process invalidates the previous ready heartbeat before validating configuration or reading credentials', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'receiver-heartbeat-'));
+    try {
+        writeFileSync(join(directory, 'heartbeat.json'), JSON.stringify({ observedAt: Date.now(), phase: 'ready' }));
+        const child = spawnSync(process.execPath, [fileURLToPath(new URL('./start-server.mjs', import.meta.url)), '--live', '--confirm-sole-receiver', '--continuous'], { env: { ...process.env, BOT_STATE_DIRECTORY: directory, REMNAWAVE_BASE_URL: 'not-a-url' }, encoding: 'utf8', timeout: 10000 });
+        assert.notEqual(child.status, 0); assert.equal(JSON.parse(readFileSync(join(directory, 'heartbeat.json'), 'utf8')).phase, 'starting');
+        assert.ok(!child.stdout.includes('not-a-url')); assert.equal(createRunSafety({ directory }).read().failures, 1);
     } finally { rmSync(directory, { recursive: true, force: true }); }
 });

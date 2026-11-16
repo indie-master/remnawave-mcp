@@ -16,6 +16,7 @@ try {
     const heartbeat = phase => writeFileSync('/state/heartbeat.json', JSON.stringify({ observedAt: Date.now(), phase }), { mode: 0o600 });
     if (safety.read().mode === 'paused') { const state = safety.read(); event({ status: 'paused', reason: state.reason, customerBot: true, ...(state.lastCause ? { cause: receiverCause({ code: state.lastCause }) } : {}) }); heartbeat('paused'); await waitForOperator({ signal: controller.signal, heartbeat: () => heartbeat('paused') }); }
     else {
+        heartbeat('starting');
         if (statSync(config.tokenFile).size > 4096) throw new Error('INVALID_CUSTOMER_CONFIGURATION');
         const token = readFileSync(config.tokenFile, 'utf8').trim();
         const options = { token, enableButtons: true, enableMiniAppButtons: true, signal: controller.signal };

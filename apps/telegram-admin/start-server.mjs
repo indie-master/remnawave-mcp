@@ -38,6 +38,7 @@ async function main() {
         await waitForOperator({ signal: controller.signal, heartbeat });
         return;
     }
+    writeFileSync(join(directory, 'heartbeat.json'), JSON.stringify({ observedAt: Date.now(), phase: 'starting' }), { mode: 0o600 });
     const config = readServerConfig(process.env);
     const extensions = readExtensions(process.env);
     const service = createConfiguredService({ baseUrl: config.baseUrl, tokenFile: config.panelTokenFile, usersEnabled: config.usersEnabled, allowedReports: config.allowedReports, signal: controller.signal });
