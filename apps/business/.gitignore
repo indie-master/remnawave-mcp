@@ -1,0 +1,8 @@
+.env
+secrets/
+state/
+backups/
+*.sqlite*
+*.log
+guides/*.png
+guides/*.jpg

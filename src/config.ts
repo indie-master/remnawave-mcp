@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 export interface Config {
     baseUrl: string;
     headers: Record<string, string>;
@@ -11,6 +13,7 @@ export interface Config {
     exclude: Set<string>;
     include: Set<string> | null;
     maxResponseChars: number;
+    maxResponseBytes?: number;
     /** compact JSON without nulls/duplicates (default true) */
     compact: boolean;
     /** max `size` for list requests (0 = no cap) */
@@ -32,17 +35,41 @@ function csv(v: string | undefined): string[] {
         .filter(Boolean);
 }
 
+function secret(name: string): string | undefined {
+    const value = process.env[name];
+    const filename = process.env[`${name}_FILE`];
+    if (value && filename) throw new Error(`Set either ${name} or ${name}_FILE, not both`);
+    if (!filename) return value || undefined;
+    let content: string;
+    try {
+        content = readFileSync(filename, 'utf8').trim();
+    } catch {
+        throw new Error(`Cannot read ${name}_FILE`);
+    }
+    if (!content) throw new Error(`${name}_FILE must not be empty`);
+    return content;
+}
+
 export function loadConfig(): Config {
     const baseUrl = process.env.REMNAWAVE_BASE_URL;
-    const apiToken = process.env.REMNAWAVE_API_TOKEN;
+    const apiToken = secret('REMNAWAVE_API_TOKEN');
     if (!baseUrl) throw new Error('REMNAWAVE_BASE_URL is required (e.g. https://panel.example.com)');
     if (!apiToken) throw new Error('REMNAWAVE_API_TOKEN is required');
+    let parsedUrl: URL;
+    try {
+        parsedUrl = new URL(baseUrl);
+    } catch {
+        throw new Error('REMNAWAVE_BASE_URL must be an HTTP(S) URL');
+    }
+    if (!['https:', 'http:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash)
+        throw new Error('REMNAWAVE_BASE_URL must be HTTP(S) without credentials, query or fragment');
 
     const headers: Record<string, string> = {
         Authorization: `Bearer ${apiToken}`,
         'Content-Type': 'application/json',
     };
-    if (process.env.REMNAWAVE_API_KEY) headers['X-Api-Key'] = process.env.REMNAWAVE_API_KEY;
+    const apiKey = secret('REMNAWAVE_API_KEY');
+    if (apiKey) headers['X-Api-Key'] = apiKey;
     // Direct connection to the panel container (http://remnawave:3000 inside the Docker network):
     // the panel expects the headers a reverse proxy would normally add.
     if (/^http:\/\//i.test(baseUrl)) {
@@ -58,8 +85,8 @@ export function loadConfig(): Config {
         }
     }
     if (process.env.CF_ACCESS_CLIENT_ID) headers['CF-Access-Client-Id'] = process.env.CF_ACCESS_CLIENT_ID;
-    if (process.env.CF_ACCESS_CLIENT_SECRET)
-        headers['CF-Access-Client-Secret'] = process.env.CF_ACCESS_CLIENT_SECRET;
+    const cfSecret = secret('CF_ACCESS_CLIENT_SECRET');
+    if (cfSecret) headers['CF-Access-Client-Secret'] = cfSecret;
 
     // Safe by default: write tools appear only with REMNAWAVE_READONLY=false.
     const readonly = (process.env.REMNAWAVE_READONLY || 'true').toLowerCase() !== 'false';
@@ -77,11 +104,12 @@ export function loadConfig(): Config {
         headers,
         readonly,
         privacy: privacy as Config['privacy'],
-        privacySalt: process.env.REMNAWAVE_PRIVACY_SALT || undefined,
+        privacySalt: secret('REMNAWAVE_PRIVACY_SALT'),
         showSecrets,
         exclude: new Set(csv(process.env.REMNAWAVE_TOOLS_EXCLUDE)),
         include: include.length ? new Set(include) : null,
         maxResponseChars: num(process.env.REMNAWAVE_MAX_RESPONSE_CHARS, 60000),
+        maxResponseBytes: Math.max(1, Math.floor(num(process.env.REMNAWAVE_MAX_RESPONSE_BYTES, 5 * 1024 * 1024))),
         compact: (process.env.REMNAWAVE_COMPACT || 'true').toLowerCase() !== 'false',
         maxPageSize: num(process.env.REMNAWAVE_MAX_PAGE_SIZE, 200),
         cooldown: {

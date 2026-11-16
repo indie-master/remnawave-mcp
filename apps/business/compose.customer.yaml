@@ -1,0 +1,6 @@
+services:
+  portal:
+    volumes:
+      - customer-bridge:/customer-bridge
+volumes:
+  customer-bridge:

@@ -1,0 +1,7 @@
+services:
+  bot:
+    secrets:
+      - panel_write_token
+secrets:
+  panel_write_token:
+    file: ./secrets/panel-write-token.txt

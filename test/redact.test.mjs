@@ -1,5 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+
+test('credentials and personal data in JSON-encoded configuration strings are filtered', () => {
+    const privacy = new Privacy('strict', 'test');
+    const output = privacy.apply({ config: JSON.stringify({ privateKey: 'DEMO_PRIVATE', email: 'demo@example.invalid' }) });
+    assert.ok(!JSON.stringify(output).includes('DEMO_PRIVATE'));
+    assert.ok(!JSON.stringify(output).includes('demo@example.invalid'));
+});
+
+test('secret fields containing arrays are hidden as a whole', () => {
+    const privacy = new Privacy('strict', 'test');
+    assert.equal(privacy.apply({ accessToken: ['DEMO_TOKEN'] }).accessToken, '[hidden]');
+});
 import { Privacy } from '../dist/redact.js';
 import { SECRETS, PII, user, configProfile, snippets, template, history, assertNoLeak } from './helpers.mjs';
 

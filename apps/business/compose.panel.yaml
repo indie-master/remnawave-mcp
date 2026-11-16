@@ -1,0 +1,6 @@
+services:
+  portal:
+    secrets: [panel_api_token]
+secrets:
+  panel_api_token:
+    file: ../telegram-admin/secrets/panel-api-token.txt
