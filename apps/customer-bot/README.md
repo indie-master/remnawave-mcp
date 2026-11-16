@@ -1,20 +1,47 @@
-import { createServer } from 'node:http';
-import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { redactSupport } from './store.mjs';
-import { verifyTelegramLaunch } from './telegram-auth.mjs';
+# Отдельный клиентский Telegram-бот
 
-const sessionToken = request => request.headers.authorization !== undefined ? request.headers.authorization.match(/^Bearer ([a-f0-9]{64})$/)?.[1] : request.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1];
+Модуль предназначен для пользователей сервиса. Административный бот сохраняет управление панелью и очередь поддержки. Клиентский бот использует другой токен, контейнер, состояние и Unix-сокет. Он не получает токены панели, Codex-авторизацию, административный сокет и Docker socket.
 
-export function createPortal({ store, support, origin, panelRead, billingEnabled = false, plans = {}, analyzeMedia, maxMediaBytes = 5242880, guides, customerUsername, miniAppEnabled = false, verifyLaunch = verifyTelegramLaunch }) {
-    const publicOrigin = new URL(origin);
-    const local = publicOrigin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(publicOrigin.hostname);
-    if ((!local && publicOrigin.protocol !== 'https:') || publicOrigin.pathname !== '/' || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error('INVALID_PORTAL_ORIGIN');
-    if (miniAppEnabled && (local || !store.customer.enabled || !customerUsername)) throw new Error('INVALID_MINI_APP_CONFIGURATION');
-    const html = readFileSync(new URL('./portal.html', import.meta.url), 'utf8');
-    const availablePlans = billingEnabled ? ['RUB', 'USDT'].flatMap(currency => {
-        const plan = plans[currency];
-        return plan && Number.isSafeInteger(plan.units) && plan.units > 0 && plan.units <= 100000000000 && Number.isInteger(plan.days) && plan.days >= 1 && plan.days <= 366 ? [{ currency, units: plan.units, days: plan.dнных запуска пять минут. Токен бота не передаётся кабинету. Подпись проверяется до регистрации и выдачи сессии; повтор чужого запуска без действующей сессии отклоняется.
+Доступны кнопки своего аккаунта, поддержки, переписки и меню. Обычный текст добавляется в ту же историю, что и в кабинете. Локальные FAQ отвечают без модели; неизвестное обращение передаётся администратору. Последующие уточнения не создают повторных заглушек. Ответ администратора появляется в кабинете и доставляется именно клиентским ботом. Платёжные подтверждения, изменение пользователей и ИИ здесь не подключены.
+
+## Начать с Telegram или с кабинета
+
+Обычный `/start` теперь создаёт клиентский аккаунт без предварительного входа на сайт. Повторный запуск открывает тот же аккаунт. Имя берётся из проверенного профиля отправителя Telegram. Создаются нулевой баланс и собственная переписка; VPN-пользователь, платная подписка и средства автоматически не выдаются. Поддержка доступна и до подключения подписки.
+
+В Mini App можно выбрать «Новую почту для этого аккаунта», задать почту и пароль от 12 символов, затем входить ими в обычном браузере. Если кабинет уже есть, выбрать «Мой существующий кабинет» и подтвердить его почту и пароль. Его баланс, подписка и история сохраняются; переписка нового Telegram-аккаунта переносится в тот же кабинет. Объединение допускается только для предварительного Telegram-аккаунта без финансовых операций, VPN-пользователя и собственной почты. Остальные случаи требуют администратора, без скрытого переноса денег.
+
+Обратный путь сохраняется: войти в существующий кабинет и нажать «Подключить Telegram». Если в боте уже был предварительный аккаунт, он присоединится с теми же ограничениями. Знание чужого email, ID или имени не авторизует привязку: нужны пароль кабинета либо одноразовая ссылка из его сессии. Уже занятая другим Telegram привязка не перезаписывается. Отвязка Telegram от аккаунта без почты запрещена, чтобы не потерять доступ.
+
+Почта используется как логин; её владение письмом и восстановление пароля пока не настроены. Автоматическое создание клиентских аккаунтов можно отключить в `botctl business settings` переменной `CUSTOMER_SIGNUP_ENABLED=false`. Тогда остаётся прежняя привязка из существующего кабинета. При отсутствии этой переменной создание включено для уже включённого клиентского модуля.
+
+## Mini App без повторного ввода пароля
+
+Подготовьте публичный HTTPS-адрес кабинета с корректным сертификатом. `localhost` и SSH-туннель на телефоне для Mini App не подходят. До готовности HTTPS оставьте `PORTAL_MINI_APP_ENABLED=false`: обычный бот и закрытый кабинет продолжают работать.
+
+В `./botctl business settings` сохраните остальные значения и задайте:
+
+```dotenv
+PORTAL_PUBLIC_ORIGIN=https://portal.example.invalid
+PORTAL_MINI_APP_ENABLED=true
+CUSTOMER_SIGNUP_ENABLED=true
+```
+
+Замените пример собственным адресом. `CUSTOMER_BOT_ENABLED=true` и прежний username клиентского бота должны оставаться в настройках. Публичный reverse proxy направляет этот домен на `127.0.0.1:8787`, включая `/miniapp` и `/api/`; не добавляйте для `/miniapp` глобальный запрет фреймов. Готовый пример — `apps/business/nginx.conf.template`. Не подключайте кабинет к сетям панели и не открывайте порт 8787 наружу. Настройка DNS/сертификата и доступность домена проверяются до включения флага; существующий proxy и другие контейнеры не заменяются автоматически.
+
+Примените пакет одним комплектом из `apps/telegram-admin`:
+
+```bash
+./botctl business check &&
+./botctl customer check &&
+./botctl business build &&
+./botctl customer build &&
+./botctl business start &&
+./botctl customer start &&
+./botctl business status &&
+./botctl customer status
+```
+
+После проверки личности бота он автоматически установит кнопку «Кабинет» около поля ввода и добавит «Личный кабинет» в своё меню. Для этого не требуется вручную создавать Web App в BotFather. Вход использует серверную [проверку подписи Telegram Ed25519](https://core.telegram.org/bots/webapps#validating-data-for-third-party-use), фиксированный production-ключ, фактический ID бота из `getMe` и срок данных запуска пять минут. Токен бота не передаётся кабинету. Подпись проверяется до регистрации и выдачи сессии; повтор чужого запуска без действующей сессии отклоняется.
 
 Обычный сайт сохраняет запрет встраивания, SDK Telegram загружается только на `/miniapp`. Для веб-версии Telegram предусмотрена сессия в памяти страницы, если браузер блокирует сторонние cookies; она не сохраняется в localStorage и не добавляется в URL. Origin и CSRF проверяются для изменений. После выхода или истечения сеанса откройте Mini App заново кнопкой бота. ИИ и бюджет для регистрации, привязок и входа не используются.
 
